@@ -1,0 +1,17 @@
+services:
+  datalogger:
+    image: nquangkhanh/datalogger:1.0
+    container_name: datalogger
+    restart: unless-stopped
+
+    volumes:
+      - ./RuntimeData:/app/RuntimeData
+
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
