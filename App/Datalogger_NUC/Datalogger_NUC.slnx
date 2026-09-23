@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Ftp/Ftp.csproj" />
+  <Project Path="Modbus/Modbus.csproj" />
+  <Project Path="Mqtt/Mqtt.csproj" />
+</Solution>

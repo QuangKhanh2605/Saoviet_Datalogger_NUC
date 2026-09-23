@@ -1,14 +1,97 @@
 services:
-  datalogger:
-    image: nquangkhanh/datalogger:1.0
-    container_name: datalogger
+
+  # ==========================================================
+  # MODBUS
+  # ==========================================================
+
+  modbus:
+    image: nquangkhanh/datalogger-modbus:1.0
+    container_name: datalogger-modbus
     restart: unless-stopped
+
+    ports:
+      - "5000:5000"
 
     volumes:
       - ./RuntimeData:/app/RuntimeData
 
     devices:
-      - /dev/ttyUSB0:/dev/ttyUSB0
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+
+  # ==========================================================
+  # DATABASE
+  # ==========================================================
+
+  database:
+    image: nquangkhanh/datalogger-database:1.0
+    container_name: datalogger-database
+    restart: unless-stopped
+
+    ports:
+      - "5001:5001"
+
+    volumes:
+      - ./RuntimeData:/app/RuntimeData
+
+    depends_on:
+      - modbus
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+
+  # ==========================================================
+  # MQTT
+  # ==========================================================
+
+  mqtt:
+    image: nquangkhanh/datalogger-mqtt:1.0
+    container_name: datalogger-mqtt
+    restart: unless-stopped
+
+    ports:
+      - "5003:5003"
+
+    volumes:
+      - ./RuntimeData:/app/RuntimeData
+
+    depends_on:
+      - database
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+
+  # ==========================================================
+  # FTP
+  # ==========================================================
+
+  ftp:
+    image: nquangkhanh/datalogger-ftp:1.0
+    container_name: datalogger-ftp
+    restart: unless-stopped
+
+    ports:
+      - "5002:5002"
+
+    volumes:
+      - ./RuntimeData:/app/RuntimeData
+
+    depends_on:
+      - database
 
     logging:
       driver: json-file

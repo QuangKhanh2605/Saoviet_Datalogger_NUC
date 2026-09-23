@@ -1,0 +1,70 @@
+{
+    "Device": {
+        "Id": "SVWMPC26009999",
+        "Ver": "SVC_NUC_LINUX_V1_1_0"
+    },
+    "Web": {
+        "Port": 5002
+    },
+    "DatabaseApi": {
+        "BaseUrl": "http://localhost:5001"
+    },
+    "Ftp": {
+        "Enabled": true,
+        "Servers": [
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT001",
+                "KYHIEU_TRAM": "TRAM001",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL24009999",
+                "PackageMode": 2,
+                "ModePath": 2
+            },
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT002",
+                "KYHIEU_TRAM": "TRAM002",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL24009999",
+                "PackageMode": 2,
+                "ModePath": 1
+            }
+        ]
+    },
+    "Ftp2": {
+        "Enabled": true,
+        "Servers": [
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT001",
+                "KYHIEU_TRAM": "TRAM001",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL25009999",
+                "PackageMode": 2,
+                "ModePath": 0
+            },
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT002",
+                "KYHIEU_TRAM": "TRAM002",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL25009999",
+                "PackageMode": 2,
+                "ModePath": 1
+            }
+        ]
+    }
+}

@@ -1,0 +1,43 @@
+{
+    "Device": {
+        "Id": "SVWMPC26009999",
+        "Ver": "SVC_NUC_LINUX_V1_1_0"
+    },
+    "Web": {
+        "Port": 5003
+    },
+    "Sensor": {
+        "ReadIntervalSeconds": 3
+    },
+    "DatabaseApi": {
+        "BaseUrl": "http://localhost:5001"
+    },
+    "Database": {
+        "SaveIntervalMinutes": 1,
+        "SaveSecond": 10,
+        "RetentionDays": 30,
+        "MaxDatabaseSizeMB": 10,
+        "CleanupIntervalSeconds": 10,
+        "VacuumAfterCleanup": true
+    },
+    "Mqtt": {
+        "Enabled": true,
+        "KeepAliveSeconds": 30,
+        "Topic": "NUC/DLSV/DLCM/",
+        "Sub": "AMI/",
+        "PublishQos": 1,
+        "SubscribeQos": 1,
+        "Main": {
+            "IP": "124.158.5.135",
+            "Port": 1883,
+            "User": "syswmsv",
+            "Pass": "sv@wmsv568"
+        },
+        "Backup": {
+            "IP": "124.158.5.135",
+            "Port": 1883,
+            "User": "syswmsv",
+            "Pass": "sv@wmsv568"
+        }
+    }
+}
