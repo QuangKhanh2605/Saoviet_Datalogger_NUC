@@ -6,7 +6,7 @@ public class SensorReading
 
     public byte SlaveId { get; set; }
 
-    public string ParameterName { get; set; } = "";
+    public string Name { get; set; } = "";
 
     public double Value { get; set; }
 

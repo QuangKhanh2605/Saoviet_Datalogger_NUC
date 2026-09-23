@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Datalogger_NUC\\Mqtt\\Mqtt.csproj": {}
+    "D:\\Datalogger_NUC\\mqtt\\Mqtt.csproj": {}
   },
   "projects": {
-    "D:\\Datalogger_NUC\\Mqtt\\Mqtt.csproj": {
+    "D:\\Datalogger_NUC\\mqtt\\Mqtt.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Datalogger_NUC\\Mqtt\\Mqtt.csproj",
+        "projectUniqueName": "D:\\Datalogger_NUC\\mqtt\\Mqtt.csproj",
         "projectName": "Mqtt",
-        "projectPath": "D:\\Datalogger_NUC\\Mqtt\\Mqtt.csproj",
+        "projectPath": "D:\\Datalogger_NUC\\mqtt\\Mqtt.csproj",
         "packagesPath": "C:\\Users\\PC\\.nuget\\packages\\",
-        "outputPath": "D:\\Datalogger_NUC\\Mqtt\\obj\\",
+        "outputPath": "D:\\Datalogger_NUC\\mqtt\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files\\dotnet\\sdk\\NuGetFallbackFolder"

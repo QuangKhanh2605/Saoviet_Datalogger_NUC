@@ -1,6 +1,6 @@
 using System.Text;
-using Mqtt.Configuration;
 using Microsoft.Extensions.Options;
+using Mqtt.Configuration;
 using MQTTnet;
 using MQTTnet.Formatter;
 using MQTTnet.Protocol;

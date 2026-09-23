@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Datalogger_NUC\\Ftp\\Ftp.csproj": {}
+    "D:\\Datalogger_NUC\\ftp\\Ftp.csproj": {}
   },
   "projects": {
-    "D:\\Datalogger_NUC\\Ftp\\Ftp.csproj": {
+    "D:\\Datalogger_NUC\\ftp\\Ftp.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Datalogger_NUC\\Ftp\\Ftp.csproj",
+        "projectUniqueName": "D:\\Datalogger_NUC\\ftp\\Ftp.csproj",
         "projectName": "Ftp",
-        "projectPath": "D:\\Datalogger_NUC\\Ftp\\Ftp.csproj",
+        "projectPath": "D:\\Datalogger_NUC\\ftp\\Ftp.csproj",
         "packagesPath": "C:\\Users\\PC\\.nuget\\packages\\",
-        "outputPath": "D:\\Datalogger_NUC\\Ftp\\obj\\",
+        "outputPath": "D:\\Datalogger_NUC\\ftp\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files\\dotnet\\sdk\\NuGetFallbackFolder"

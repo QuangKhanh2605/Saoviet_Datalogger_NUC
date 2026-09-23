@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Datalogger_NUC\\Database\\Database.csproj": {}
+    "D:\\Datalogger_NUC\\database\\Database.csproj": {}
   },
   "projects": {
-    "D:\\Datalogger_NUC\\Database\\Database.csproj": {
+    "D:\\Datalogger_NUC\\database\\Database.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Datalogger_NUC\\Database\\Database.csproj",
+        "projectUniqueName": "D:\\Datalogger_NUC\\database\\Database.csproj",
         "projectName": "Database",
-        "projectPath": "D:\\Datalogger_NUC\\Database\\Database.csproj",
+        "projectPath": "D:\\Datalogger_NUC\\database\\Database.csproj",
         "packagesPath": "C:\\Users\\PC\\.nuget\\packages\\",
-        "outputPath": "D:\\Datalogger_NUC\\Database\\obj\\",
+        "outputPath": "D:\\Datalogger_NUC\\database\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files\\dotnet\\sdk\\NuGetFallbackFolder"

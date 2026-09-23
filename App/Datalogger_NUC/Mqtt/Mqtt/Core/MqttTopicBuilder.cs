@@ -1,5 +1,5 @@
-using Mqtt.Configuration;
 using Microsoft.Extensions.Options;
+using Mqtt.Configuration;
 
 namespace Mqtt.Mqtt.Core;
 

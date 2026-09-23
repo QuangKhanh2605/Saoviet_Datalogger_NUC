@@ -10,7 +10,8 @@ public sealed class DatabaseApiService
 
     public DatabaseApiService(
         IHttpClientFactory httpClientFactory,
-        ILogger<DatabaseApiService> logger)
+        ILogger<DatabaseApiService> logger
+    )
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
@@ -23,36 +24,29 @@ public sealed class DatabaseApiService
     public async Task<List<StationMessage>> GetPendingFtpMessagesAsync(
         IEnumerable<string>? stationNames,
         int maxMessages,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        string url = BuildPendingUrl(
-            "/api/ftp/pending",
-            stationNames,
-            maxMessages);
+        string url = BuildPendingUrl("/api/ftp/pending", stationNames, maxMessages);
 
         try
         {
-            HttpClient client =
-                _httpClientFactory.CreateClient("DatabaseApi");
+            HttpClient client = _httpClientFactory.CreateClient("DatabaseApi");
 
-            List<StationMessage>? messages =
-                await client.GetFromJsonAsync<List<StationMessage>>(
-                    url,
-                    cancellationToken);
+            List<StationMessage>? messages = await client.GetFromJsonAsync<List<StationMessage>>(
+                url,
+                cancellationToken
+            );
 
             return messages ?? new List<StationMessage>();
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "Lấy FTP pending API thất bại. Url={Url}",
-                url);
+            _logger.LogError(ex, "Lấy FTP pending API thất bại. Url={Url}", url);
 
             return new List<StationMessage>();
         }
@@ -65,36 +59,29 @@ public sealed class DatabaseApiService
     public async Task<List<StationMessage>> GetPendingFtp2MessagesAsync(
         IEnumerable<string>? stationNames,
         int maxMessages,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        string url = BuildPendingUrl(
-            "/api/ftp2/pending",
-            stationNames,
-            maxMessages);
+        string url = BuildPendingUrl("/api/ftp2/pending", stationNames, maxMessages);
 
         try
         {
-            HttpClient client =
-                _httpClientFactory.CreateClient("DatabaseApi");
+            HttpClient client = _httpClientFactory.CreateClient("DatabaseApi");
 
-            List<StationMessage>? messages =
-                await client.GetFromJsonAsync<List<StationMessage>>(
-                    url,
-                    cancellationToken);
+            List<StationMessage>? messages = await client.GetFromJsonAsync<List<StationMessage>>(
+                url,
+                cancellationToken
+            );
 
             return messages ?? new List<StationMessage>();
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "Lấy FTP2 pending API thất bại. Url={Url}",
-                url);
+            _logger.LogError(ex, "Lấy FTP2 pending API thất bại. Url={Url}", url);
 
             return new List<StationMessage>();
         }
@@ -106,12 +93,10 @@ public sealed class DatabaseApiService
 
     public async Task MarkFtpSentAsync(
         IEnumerable<long> messageIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        await MarkSentAsync(
-            "/api/ftp/mark-sent",
-            messageIds,
-            cancellationToken);
+        await MarkSentAsync("/api/ftp/mark-sent", messageIds, cancellationToken);
     }
 
     // ============================================================
@@ -120,12 +105,10 @@ public sealed class DatabaseApiService
 
     public async Task MarkFtp2SentAsync(
         IEnumerable<long> messageIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        await MarkSentAsync(
-            "/api/ftp2/mark-sent",
-            messageIds,
-            cancellationToken);
+        await MarkSentAsync("/api/ftp2/mark-sent", messageIds, cancellationToken);
     }
 
     // ============================================================
@@ -135,23 +118,21 @@ public sealed class DatabaseApiService
     private static string BuildPendingUrl(
         string endpoint,
         IEnumerable<string>? stationNames,
-        int maxMessages)
+        int maxMessages
+    )
     {
-        string url =
-            $"{endpoint}?maxMessages={maxMessages}";
+        string url = $"{endpoint}?maxMessages={maxMessages}";
 
         if (stationNames != null)
         {
-            string stations =
-                string.Join(
-                    ",",
-                    stationNames.Where(
-                        x => !string.IsNullOrWhiteSpace(x)));
+            string stations = string.Join(
+                ",",
+                stationNames.Where(x => !string.IsNullOrWhiteSpace(x))
+            );
 
             if (!string.IsNullOrWhiteSpace(stations))
             {
-                url +=
-                    $"&stationNames={Uri.EscapeDataString(stations)}";
+                url += $"&stationNames={Uri.EscapeDataString(stations)}";
             }
         }
 
@@ -165,51 +146,41 @@ public sealed class DatabaseApiService
     private async Task MarkSentAsync(
         string endpoint,
         IEnumerable<long> messageIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        List<long> ids =
-            messageIds
-                .Distinct()
-                .ToList();
+        List<long> ids = messageIds.Distinct().ToList();
 
         if (ids.Count == 0)
             return;
 
-        HttpClient client =
-            _httpClientFactory.CreateClient("DatabaseApi");
+        HttpClient client = _httpClientFactory.CreateClient("DatabaseApi");
 
-        var request =
-            new MarkMessagesSentRequest
-            {
-                Ids = ids
-            };
+        var request = new MarkMessagesSentRequest { Ids = ids };
 
         try
         {
-            HttpResponseMessage response =
-                await client.PostAsJsonAsync(
-                    endpoint,
-                    request,
-                    cancellationToken);
+            HttpResponseMessage response = await client.PostAsJsonAsync(
+                endpoint,
+                request,
+                cancellationToken
+            );
 
             response.EnsureSuccessStatusCode();
 
             _logger.LogInformation(
                 "API phản hồi thành công. Endpoint={Endpoint}, Count={Count}",
                 endpoint,
-                ids.Count);
+                ids.Count
+            );
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "API mark-sent thất bại. Endpoint={Endpoint}",
-                endpoint);
+            _logger.LogError(ex, "API mark-sent thất bại. Endpoint={Endpoint}", endpoint);
 
             throw;
         }

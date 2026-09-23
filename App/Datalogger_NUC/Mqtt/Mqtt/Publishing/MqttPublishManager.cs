@@ -1,10 +1,10 @@
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Mqtt.Configuration;
 using Mqtt.Mqtt.Core;
 using Mqtt.Mqtt.Models;
-using Microsoft.Extensions.Options;
 
 namespace Mqtt.Mqtt.Publishing;
 
@@ -61,14 +61,14 @@ public sealed class MqttPublishManager : BackgroundService
         MqttPublisher publisher,
         MqttConnectionManager connection,
         IHttpClientFactory httpClientFactory,
-        IOptions<AppSettings> options)
+        IOptions<AppSettings> options
+    )
     {
         _logger = logger;
         _publisher = publisher;
         _connection = connection;
 
-        _databaseApi =
-            httpClientFactory.CreateClient("DatabaseApi");
+        _databaseApi = httpClientFactory.CreateClient("DatabaseApi");
 
         _settings = options.Value;
 
@@ -79,41 +79,29 @@ public sealed class MqttPublishManager : BackgroundService
                 new PublishDefinition
                 {
                     Prepare = PrepareMePDV,
-                    PrepareFromDatabase = false,
-                    OnSuccessAsync = OnMePDVSuccessAsync
+                    OnSuccessAsync = OnMePDVSuccessAsync,
                 }
             },
-
             {
                 MqttTopics.Opera,
                 new PublishDefinition
                 {
-                    Prepare = _ => { },
                     PrepareAsync = PrepareOperaAsync,
-                    PrepareFromDatabase = true,
-                    OnSuccessAsync = OnOperaSuccessAsync
+                    OnSuccessAsync = OnOperaSuccessAsync,
                 }
             },
-
             {
                 MqttTopics.sCoFi,
                 new PublishDefinition
                 {
                     Prepare = PrepareSCoFi,
-                    PrepareFromDatabase = false,
-                    OnSuccessAsync = OnSCoFiSuccessAsync
+                    OnSuccessAsync = OnSCoFiSuccessAsync,
                 }
             },
-
             {
                 MqttTopics.sSet1,
-                new PublishDefinition
-                {
-                    Prepare = _ => { },
-                    PrepareFromDatabase = false,
-                    OnSuccessAsync = OnSSet1SuccessAsync
-                }
-            }
+                new PublishDefinition { OnSuccessAsync = OnSSet1SuccessAsync }
+            },
         };
     }
 
@@ -121,15 +109,11 @@ public sealed class MqttPublishManager : BackgroundService
     // REQUEST
     // ============================================================
 
-    public void Request(
-        string topic,
-        string? payload = null)
+    public void Request(string topic, string? payload = null)
     {
         if (string.IsNullOrWhiteSpace(topic))
         {
-            throw new ArgumentException(
-                "MQTT topic cannot be empty.",
-                nameof(topic));
+            throw new ArgumentException("MQTT topic cannot be empty.", nameof(topic));
         }
 
         lock (_lock)
@@ -139,7 +123,7 @@ public sealed class MqttPublishManager : BackgroundService
                 Topic = topic,
                 Payload = payload,
                 Data = null,
-                ConsecutiveFailures = 0
+                ConsecutiveFailures = 0,
             };
 
             if (_publishSignal.CurrentCount == 0)
@@ -153,38 +137,31 @@ public sealed class MqttPublishManager : BackgroundService
     // BACKGROUND LOOP
     // ============================================================
 
-    protected override async Task ExecuteAsync(
-        CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation(
-            "MQTT PublishManager started.");
+        _logger.LogInformation("MQTT PublishManager started.");
 
         try
         {
             await RunAsync(stoppingToken);
         }
-        catch (OperationCanceledException)
-            when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Application shutdown bình thường.
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "MQTT PublishManager stopped because of unexpected error.");
+            _logger.LogError(ex, "MQTT PublishManager stopped because of unexpected error.");
         }
 
-        _logger.LogInformation(
-            "MQTT PublishManager stopped.");
+        _logger.LogInformation("MQTT PublishManager stopped.");
     }
 
     // ============================================================
     // MAIN LOOP
     // ============================================================
 
-    public async Task RunAsync(
-        CancellationToken cancellationToken)
+    public async Task RunAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -194,9 +171,7 @@ public sealed class MqttPublishManager : BackgroundService
 
             if (!_connection.IsReady)
             {
-                await Task.Delay(
-                    500,
-                    cancellationToken);
+                await Task.Delay(500, cancellationToken);
 
                 continue;
             }
@@ -205,19 +180,15 @@ public sealed class MqttPublishManager : BackgroundService
             // Kiểm tra Database API định kỳ
             // ----------------------------------------------------
 
-            await _publishSignal.WaitAsync(
-                TimeSpan.FromMilliseconds(500),
-                cancellationToken);
+            await _publishSignal.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken);
 
-            await PrepareDatabaseTopicsAsync(
-                cancellationToken);
+            await PrepareDatabaseTopicsAsync(cancellationToken);
 
             // ----------------------------------------------------
             // Xử lý pending MQTT publish
             // ----------------------------------------------------
 
-            await ProcessPendingAsync(
-                cancellationToken);
+            await ProcessPendingAsync(cancellationToken);
         }
     }
 
@@ -225,26 +196,23 @@ public sealed class MqttPublishManager : BackgroundService
     // PROCESS PENDING
     // ============================================================
 
-    private async Task ProcessPendingAsync(
-        CancellationToken cancellationToken)
+    private async Task ProcessPendingAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            PendingPublish? pending =
-                GetNextPending();
+            PendingPublish? pending = GetNextPending();
 
             if (pending == null)
             {
                 return;
             }
 
-            if (!_definitions.TryGetValue(
-                    pending.Topic,
-                    out PublishDefinition? definition))
+            if (!_definitions.TryGetValue(pending.Topic, out PublishDefinition? definition))
             {
                 _logger.LogWarning(
                     "MQTT topic has no publish definition | Topic={Topic}",
-                    pending.Topic);
+                    pending.Topic
+                );
 
                 RemovePending(pending.Topic);
 
@@ -257,20 +225,20 @@ public sealed class MqttPublishManager : BackgroundService
 
             if (pending.Payload == null)
             {
-                if (definition.PrepareFromDatabase &&
-                    definition.PrepareAsync != null)
+                if (definition.PrepareAsync != null)
                 {
-                    await definition.PrepareAsync(
-                        pending,
-                        cancellationToken);
+                    await definition.PrepareAsync(pending, cancellationToken);
                 }
-                else
+                else if (definition.Prepare != null)
                 {
                     definition.Prepare(pending);
                 }
             }
 
-            // Không có dữ liệu để gửi.
+            // ----------------------------------------------------
+            // Không có dữ liệu để gửi
+            // ----------------------------------------------------
+
             if (pending.Payload == null)
             {
                 RemovePending(pending.Topic);
@@ -282,16 +250,9 @@ public sealed class MqttPublishManager : BackgroundService
             // Publish
             // ----------------------------------------------------
 
-            MqttPublishRequest request = new()
-            {
-                Topic = pending.Topic,
-                Payload = pending.Payload
-            };
+            MqttPublishRequest request = new() { Topic = pending.Topic, Payload = pending.Payload };
 
-            bool success =
-                await _publisher.PublishAsync(
-                    request,
-                    cancellationToken);
+            bool success = await _publisher.PublishAsync(request, cancellationToken);
 
             // ----------------------------------------------------
             // Publish thất bại
@@ -299,9 +260,7 @@ public sealed class MqttPublishManager : BackgroundService
 
             if (!success)
             {
-                await HandlePublishFailureAsync(
-                    pending,
-                    cancellationToken);
+                await HandlePublishFailureAsync(pending, cancellationToken);
 
                 return;
             }
@@ -312,30 +271,37 @@ public sealed class MqttPublishManager : BackgroundService
 
             pending.ConsecutiveFailures = 0;
 
-            bool callbackSuccess =
-                await definition.OnSuccessAsync(
-                    pending,
-                    cancellationToken);
+            bool callbackSuccess = true;
 
-            // Nếu Database API mark-sent thất bại,
-            // giữ nguyên pending để không mất batch.
+            if (definition.OnSuccessAsync != null)
+            {
+                callbackSuccess = await definition.OnSuccessAsync(pending, cancellationToken);
+            }
+
+            // ----------------------------------------------------
+            // Callback thất bại
+            // ----------------------------------------------------
+
+            // Ví dụ:
+            // MQTT publish thành công nhưng Database API
+            // mark-sent thất bại.
+            //
+            // Giữ nguyên pending để không mất batch.
+
             if (!callbackSuccess)
             {
                 _logger.LogWarning(
                     "MQTT {Topic} published, but success callback failed. "
-                    + "Keeping pending batch.",
-                    pending.Topic);
+                        + "Keeping pending batch.",
+                    pending.Topic
+                );
 
-                await Task.Delay(
-                    PublishDelayMilliseconds,
-                    cancellationToken);
+                await Task.Delay(PublishDelayMilliseconds, cancellationToken);
 
                 return;
             }
 
-            _logger.LogInformation(
-                "MQTT {Topic} published successfully.",
-                pending.Topic);
+            _logger.LogInformation("MQTT {Topic} published successfully.", pending.Topic);
 
             RemovePending(pending.Topic);
 
@@ -343,8 +309,7 @@ public sealed class MqttPublishManager : BackgroundService
             // Lấy batch tiếp theo từ Database API
             // ----------------------------------------------------
 
-            await PrepareDatabaseTopicsAsync(
-                cancellationToken);
+            await PrepareDatabaseTopicsAsync(cancellationToken);
 
             // ----------------------------------------------------
             // Delay trước batch tiếp theo
@@ -352,9 +317,7 @@ public sealed class MqttPublishManager : BackgroundService
 
             if (HasPending())
             {
-                await Task.Delay(
-                    PublishDelayMilliseconds,
-                    cancellationToken);
+                await Task.Delay(PublishDelayMilliseconds, cancellationToken);
             }
         }
     }
@@ -365,7 +328,8 @@ public sealed class MqttPublishManager : BackgroundService
 
     private async Task HandlePublishFailureAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         pending.ConsecutiveFailures++;
 
@@ -373,57 +337,69 @@ public sealed class MqttPublishManager : BackgroundService
             "MQTT publish failed | Topic={Topic} | Failure={Failure}/{Max}",
             pending.Topic,
             pending.ConsecutiveFailures,
-            MaxPublishFailures);
+            MaxPublishFailures
+        );
 
+        // --------------------------------------------------------
         // Chưa đủ 5 lần:
         // giữ nguyên payload để retry.
+        // --------------------------------------------------------
+
         if (pending.ConsecutiveFailures < MaxPublishFailures)
         {
-            await Task.Delay(
-                PublishDelayMilliseconds,
-                cancellationToken);
+            await Task.Delay(PublishDelayMilliseconds, cancellationToken);
 
             return;
         }
 
+        // --------------------------------------------------------
         // Đủ 5 lần:
         // yêu cầu reconnect.
         //
         // Không xóa pending.
+        // --------------------------------------------------------
+
         pending.ConsecutiveFailures = 0;
 
         _logger.LogWarning(
             "MQTT publish failed {Max} consecutive times. "
-            + "Requesting reconnect | Topic={Topic}",
+                + "Requesting reconnect | Topic={Topic}",
             MaxPublishFailures,
-            pending.Topic);
+            pending.Topic
+        );
 
-        _connection.RequestReconnect(
-            switchServer: true);
+        _connection.RequestReconnect(switchServer: true);
     }
 
     // ============================================================
     // PREPARE DATABASE TOPICS
     // ============================================================
 
-    private async Task PrepareDatabaseTopicsAsync(
-        CancellationToken cancellationToken)
+    private async Task PrepareDatabaseTopicsAsync(CancellationToken cancellationToken)
     {
         foreach (string topic in PublishPriority)
         {
-            if (!_definitions.TryGetValue(
-                    topic,
-                    out PublishDefinition? definition))
+            if (!_definitions.TryGetValue(topic, out PublishDefinition? definition))
             {
                 continue;
             }
 
-            if (!definition.PrepareFromDatabase)
+            // ----------------------------------------------------
+            // Topic chỉ lấy dữ liệu từ Database khi có
+            // PrepareAsync.
+            //
+            // Hiện tại Opera là topic duy nhất.
+            // ----------------------------------------------------
+
+            if (definition.PrepareAsync == null)
             {
                 continue;
             }
 
+            // ----------------------------------------------------
             // Đã có pending thì không load thêm.
+            // ----------------------------------------------------
+
             if (HasPending(topic))
             {
                 continue;
@@ -434,21 +410,15 @@ public sealed class MqttPublishManager : BackgroundService
                 Topic = topic,
                 Payload = null,
                 Data = null,
-                ConsecutiveFailures = 0
+                ConsecutiveFailures = 0,
             };
 
-            if (definition.PrepareAsync != null)
-            {
-                await definition.PrepareAsync(
-                    pending,
-                    cancellationToken);
-            }
-            else
-            {
-                definition.Prepare(pending);
-            }
+            await definition.PrepareAsync(pending, cancellationToken);
 
+            // ----------------------------------------------------
             // Không có dữ liệu Database API.
+            // ----------------------------------------------------
+
             if (pending.Payload == null)
             {
                 continue;
@@ -473,27 +443,20 @@ public sealed class MqttPublishManager : BackgroundService
     // PREPARE MePDV
     // ============================================================
 
-    private void PrepareMePDV(
-        PendingPublish pending)
+    private void PrepareMePDV(PendingPublish pending)
     {
         var data = new
         {
-            SaveIntervalMinutes =
-                _settings.Database.SaveIntervalMinutes,
+            SaveIntervalMinutes = _settings.Database.SaveIntervalMinutes,
 
-            Ver =
-                _settings.Device.Ver,
+            Ver = _settings.Device.Ver,
 
-            Server =
-                _connection.CurrentServerIp
+            Server = _connection.CurrentServerIp,
         };
 
-        pending.Payload =
-            JsonSerializer.Serialize(data);
+        pending.Payload = JsonSerializer.Serialize(data);
 
-        _logger.LogDebug(
-            "MQTT MePDV prepared | Server={Server}",
-            _connection.CurrentServerIp);
+        _logger.LogDebug("MQTT MePDV prepared | Server={Server}", _connection.CurrentServerIp);
     }
 
     // ============================================================
@@ -502,7 +465,8 @@ public sealed class MqttPublishManager : BackgroundService
 
     private async Task PrepareOperaAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         if (pending.Payload != null)
         {
@@ -517,21 +481,15 @@ public sealed class MqttPublishManager : BackgroundService
 
         try
         {
-            string url =
-                $"api/mqtt/pending?maxMessages={DatabaseBatchSize}";
+            string url = $"api/mqtt/pending?maxMessages={DatabaseBatchSize}";
 
-            List<StationMessageDto>? messages =
-                await _databaseApi.GetFromJsonAsync<
-                    List<StationMessageDto>>(
-                        url,
-                        cancellationToken);
+            List<StationMessageDto>? messages = await _databaseApi.GetFromJsonAsync<
+                List<StationMessageDto>
+            >(url, cancellationToken);
 
-            if (messages == null ||
-                messages.Count == 0)
+            if (messages == null || messages.Count == 0)
             {
-                _logger.LogDebug(
-                    "MQTT Opera Database API check | "
-                    + "No pending messages.");
+                _logger.LogDebug("MQTT Opera Database API check | " + "No pending messages.");
 
                 return;
             }
@@ -551,27 +509,23 @@ public sealed class MqttPublishManager : BackgroundService
             var data = messages
                 .Select(message => new
                 {
-                    StationName =
-                        message.StationName,
+                    StationName = message.StationName,
 
-                    Timestamp =
-                        message.Timestamp,
+                    Timestamp = message.Timestamp,
 
-                    Measurements =
-                        message.Measurements
-                            .Select(measurement => new
-                            {
-                                measurement.ParameterName,
-                                measurement.Value,
-                                measurement.Unit,
-                                measurement.Status
-                            })
-                            .ToList()
+                    Measurements = message
+                        .Measurements.Select(measurement => new
+                        {
+                            measurement.Name,
+                            measurement.Value,
+                            measurement.Unit,
+                            measurement.Status,
+                        })
+                        .ToList(),
                 })
                 .ToList();
 
-            pending.Payload =
-                JsonSerializer.Serialize(data);
+            pending.Payload = JsonSerializer.Serialize(data);
 
             // ----------------------------------------------------
             // Lưu Id của batch
@@ -580,29 +534,22 @@ public sealed class MqttPublishManager : BackgroundService
             // gọi POST /api/mqtt/mark-sent
             // ----------------------------------------------------
 
-            pending.Data =
-                messages
-                    .Select(message => message.Id)
-                    .ToList();
+            pending.Data = messages.Select(message => message.Id).ToList();
 
             _logger.LogDebug(
                 "MQTT Opera prepared from Database API | "
-                + "BatchSize={BatchSize} | Stations={Stations}",
+                    + "BatchSize={BatchSize} | Stations={Stations}",
                 messages.Count,
-                string.Join(
-                    ", ",
-                    messages.Select(x => x.StationName)));
+                string.Join(", ", messages.Select(x => x.StationName))
+            );
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(
-                ex,
-                "Database API pending request failed.");
+            _logger.LogWarning(ex, "Database API pending request failed.");
 
             // Không tạo payload.
             // Lần sau sẽ gọi lại API.
@@ -613,8 +560,7 @@ public sealed class MqttPublishManager : BackgroundService
     // PREPARE sCoFi
     // ============================================================
 
-    private void PrepareSCoFi(
-        PendingPublish pending)
+    private void PrepareSCoFi(PendingPublish pending)
     {
         // Nếu sCoFi được Request() với payload
         // thì pending.Payload đã có sẵn.
@@ -626,7 +572,8 @@ public sealed class MqttPublishManager : BackgroundService
 
     private Task<bool> OnMePDVSuccessAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         return Task.FromResult(true);
     }
@@ -637,10 +584,10 @@ public sealed class MqttPublishManager : BackgroundService
 
     private async Task<bool> OnOperaSuccessAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
-        if (pending.Data is not List<long> messageIds ||
-            messageIds.Count == 0)
+        if (pending.Data is not List<long> messageIds || messageIds.Count == 0)
         {
             return true;
         }
@@ -661,43 +608,37 @@ public sealed class MqttPublishManager : BackgroundService
 
         try
         {
-            MarkMessagesSentRequest request = new()
-            {
-                Ids = messageIds
-            };
+            MarkMessagesSentRequest request = new() { Ids = messageIds };
 
-            HttpResponseMessage response =
-                await _databaseApi.PostAsJsonAsync(
-                    "api/mqtt/mark-sent",
-                    request,
-                    cancellationToken);
+            HttpResponseMessage response = await _databaseApi.PostAsJsonAsync(
+                "api/mqtt/mark-sent",
+                request,
+                cancellationToken
+            );
 
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning(
                     "Database API mark-sent failed | "
-                    + "StatusCode={StatusCode} | "
-                    + "MessageIds={MessageIds}",
+                        + "StatusCode={StatusCode} | "
+                        + "MessageIds={MessageIds}",
                     (int)response.StatusCode,
-                    string.Join(
-                        ", ",
-                        messageIds));
+                    string.Join(", ", messageIds)
+                );
 
                 return false;
             }
 
             _logger.LogInformation(
                 "MQTT Opera Database API batch marked as sent | "
-                + "Count={Count} | MessageIds={MessageIds}",
+                    + "Count={Count} | MessageIds={MessageIds}",
                 messageIds.Count,
-                string.Join(
-                    ", ",
-                    messageIds));
+                string.Join(", ", messageIds)
+            );
 
             return true;
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -705,11 +646,9 @@ public sealed class MqttPublishManager : BackgroundService
         {
             _logger.LogWarning(
                 ex,
-                "Database API mark-sent request failed | "
-                + "MessageIds={MessageIds}",
-                string.Join(
-                    ", ",
-                    messageIds));
+                "Database API mark-sent request failed | " + "MessageIds={MessageIds}",
+                string.Join(", ", messageIds)
+            );
 
             return false;
         }
@@ -721,7 +660,8 @@ public sealed class MqttPublishManager : BackgroundService
 
     private Task<bool> OnSCoFiSuccessAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         return Task.FromResult(true);
     }
@@ -732,7 +672,8 @@ public sealed class MqttPublishManager : BackgroundService
 
     private Task<bool> OnSSet1SuccessAsync(
         PendingPublish pending,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         return Task.FromResult(true);
     }
@@ -747,9 +688,7 @@ public sealed class MqttPublishManager : BackgroundService
         {
             foreach (string topic in PublishPriority)
             {
-                if (_pending.TryGetValue(
-                        topic,
-                        out PendingPublish? pending))
+                if (_pending.TryGetValue(topic, out PendingPublish? pending))
                 {
                     return pending;
                 }
@@ -821,38 +760,11 @@ public sealed class MqttPublishManager : BackgroundService
 
     private sealed class PublishDefinition
     {
-        public required
-            Action<PendingPublish> Prepare
-        {
-            get;
-            init;
-        }
+        public Action<PendingPublish>? Prepare { get; init; }
 
-        public Func<
-            PendingPublish,
-            CancellationToken,
-            Task>? PrepareAsync
-        {
-            get;
-            init;
-        }
+        public Func<PendingPublish, CancellationToken, Task>? PrepareAsync { get; init; }
 
-        public required
-            Func<
-                PendingPublish,
-                CancellationToken,
-                Task<bool>>
-            OnSuccessAsync
-        {
-            get;
-            init;
-        }
-
-        public bool PrepareFromDatabase
-        {
-            get;
-            init;
-        }
+        public Func<PendingPublish, CancellationToken, Task<bool>>? OnSuccessAsync { get; init; }
     }
 
     // ============================================================
@@ -882,7 +794,7 @@ public sealed class MqttPublishManager : BackgroundService
 
         public byte SlaveId { get; set; }
 
-        public string ParameterName { get; set; } = "";
+        public string Name { get; set; } = "";
 
         public double Value { get; set; }
 

@@ -10,6 +10,5 @@ public class DatabaseCleanupResult
 
     public int DeletedBySize { get; set; }
 
-    public int TotalDeleted =>
-        DeletedByRetention + DeletedBySize;
+    public int TotalDeleted => DeletedByRetention + DeletedBySize;
 }

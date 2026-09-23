@@ -1,8 +1,8 @@
+using Microsoft.Extensions.Options;
 using Mqtt.Configuration;
 using Mqtt.Mqtt.Core;
 using Mqtt.Mqtt.Publishing;
 using Mqtt.Mqtt.Subscribing;
-using Microsoft.Extensions.Options;
 
 namespace Mqtt.Mqtt;
 

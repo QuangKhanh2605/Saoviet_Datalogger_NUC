@@ -1,0 +1,208 @@
+{
+    "Stations": [
+        {
+            "Enabled": true,
+            "StationName": "TRAM001",
+            "Connection": {
+                "Protocol": "ModbusRtu",
+                "PortName": "COM18",
+                "BaudRate": 9600,
+                "Parity": "None",
+                "DataBits": 8,
+                "StopBits": "One"
+            },
+            "Sensors": [
+                {
+                    "SlaveId": 1,
+                    "Blocks": [
+                        {
+                            "StartAddress": "0x0000",
+                            "Quantity": 10,
+                            "Function": 3,
+                            "Parameters": [
+                                {
+                                    "Name": "pH",
+                                    "Unit": "pH",
+                                    "Read": {
+                                        "Address": "0x0000",
+                                        "Type": "Float32",
+                                        "Length": 2,
+                                        "ByteOrder": "CDAB",
+                                        "Scale": 1.0,
+                                        "OffsetValue": 0.0
+                                    }
+                                }
+                            ],
+                            "Statuses": [
+                                {
+                                    "Parameter": "pH",
+                                    "Address": "0x0006",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "1": "OK",
+                                        "2": "CALIBRATING",
+                                        "*": "ERROR"
+                                    }
+                                },
+                                {
+                                    "Parameter": "pH",
+                                    "Address": "0x0008",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "3": "OK",
+                                        "*": "ERROR"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "Write": []
+                },
+                {
+                    "SlaveId": 2,
+                    "Blocks": [
+                        {
+                            "StartAddress": "0x0000",
+                            "Quantity": 10,
+                            "Function": 3,
+                            "Parameters": [
+                                {
+                                    "Name": "EC",
+                                    "Unit": "mS/cm",
+                                    "Read": {
+                                        "Address": "0x0000",
+                                        "Type": "Float32",
+                                        "Length": 2,
+                                        "ByteOrder": "CDAB",
+                                        "Scale": 1.0,
+                                        "OffsetValue": 0.0
+                                    }
+                                },
+                                {
+                                    "Name": "Chlorine",
+                                    "Unit": "mg/L",
+                                    "Read": {
+                                        "Address": "0x0002",
+                                        "Type": "Float32",
+                                        "Length": 2,
+                                        "ByteOrder": "CDAB",
+                                        "Scale": 1.0,
+                                        "OffsetValue": 0.0
+                                    }
+                                }
+                            ],
+                            "Statuses": [
+                                {
+                                    "Parameter": "EC",
+                                    "Address": "0x0007",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "1": "OK",
+                                        "*": "ERROR"
+                                    }
+                                },
+                                {
+                                    "Parameter": "Chlorine",
+                                    "Address": "0x0008",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "1": "OK",
+                                        "*": "ERROR"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "Write": [
+                        {
+                            "Address": "0x000A",
+                            "Function": 16,
+                            "Type": "Float32",
+                            "Length": 2,
+                            "ByteOrder": "CDAB",
+                            "Source": {
+                                "Parameter": "pH"
+                            },
+                            "FallbackValue": 0.0,
+                            "Scale": 1.0
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "Enabled": true,
+            "StationName": "TRAM002",
+            "Connection": {
+                "Protocol": "ModbusTcp",
+                "IpAddress": "host.docker.internal",
+                "Port": 502
+            },
+            "Sensors": [
+                {
+                    "SlaveId": 2,
+                    "Blocks": [
+                        {
+                            "StartAddress": "0x0000",
+                            "Quantity": 10,
+                            "Function": 3,
+                            "Parameters": [
+                                {
+                                    "Name": "EC",
+                                    "Unit": "mS/cm",
+                                    "Read": {
+                                        "Address": "0x0000",
+                                        "Type": "Float32",
+                                        "Length": 2,
+                                        "ByteOrder": "CDAB",
+                                        "Scale": 1.0,
+                                        "OffsetValue": 0.0
+                                    }
+                                },
+                                {
+                                    "Name": "Chlorine",
+                                    "Unit": "mg/L",
+                                    "Read": {
+                                        "Address": "0x0002",
+                                        "Type": "Float32",
+                                        "Length": 2,
+                                        "ByteOrder": "CDAB",
+                                        "Scale": 1.0,
+                                        "OffsetValue": 0.0
+                                    }
+                                }
+                            ],
+                            "Statuses": [
+                                {
+                                    "Parameter": "EC",
+                                    "Address": "0x0007",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "1": "OK",
+                                        "*": "ERROR"
+                                    }
+                                },
+                                {
+                                    "Parameter": "Chlorine",
+                                    "Address": "0x0008",
+                                    "Type": "UInt16",
+                                    "Length": 1,
+                                    "Rules": {
+                                        "1": "OK",
+                                        "*": "ERROR"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "Write": []
+                }
+            ]
+        }
+    ]
+}

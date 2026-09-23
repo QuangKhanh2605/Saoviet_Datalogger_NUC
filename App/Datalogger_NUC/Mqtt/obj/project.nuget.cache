@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "9m81I7Fd774=",
+  "dgSpecHash": "VkCGspBkz6s=",
   "success": true,
-  "projectFilePath": "D:\\Datalogger_NUC\\Mqtt\\Mqtt.csproj",
+  "projectFilePath": "D:\\Datalogger_NUC\\mqtt\\Mqtt.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\PC\\.nuget\\packages\\mqttnet\\5.0.1.1416\\mqttnet.5.0.1.1416.nupkg.sha512"
   ],

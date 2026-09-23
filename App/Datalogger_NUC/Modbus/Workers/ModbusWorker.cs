@@ -1,10 +1,10 @@
 using System.IO.Ports;
+using Microsoft.Extensions.Options;
 using Modbus.Configuration;
 using Modbus.Hardware;
 using Modbus.Models;
 using Modbus.Sensors;
 using Modbus.Services;
-using Microsoft.Extensions.Options;
 
 namespace Modbus.Workers;
 
@@ -471,7 +471,7 @@ public class ModbusWorker : BackgroundService
             _readingStore.ResetParameterErrorCount(
                 reading.StationName,
                 reading.SlaveId,
-                reading.ParameterName
+                reading.Name
             );
 
             _readingStore.UpdateReading(reading);
@@ -487,7 +487,7 @@ public class ModbusWorker : BackgroundService
                     + "Status={Status}",
                 reading.StationName,
                 reading.SlaveId,
-                reading.ParameterName,
+                reading.Name,
                 reading.Value,
                 reading.Status
             );
@@ -617,7 +617,7 @@ public class ModbusWorker : BackgroundService
         {
             StationName = station.StationName,
             SlaveId = slaveId,
-            ParameterName = parameter.Name,
+            Name = parameter.Name,
             Value = 0,
             Unit = parameter.Unit,
             Status = StatusCode.Error,

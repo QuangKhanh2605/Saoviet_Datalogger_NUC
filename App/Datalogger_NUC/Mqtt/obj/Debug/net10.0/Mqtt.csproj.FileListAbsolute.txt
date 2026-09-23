@@ -5,7 +5,6 @@ D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\Mqtt.AssemblyInfo.cs
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\Mqtt.csproj.CoreCompileInputs.cache
 D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\appsettings.Development.json
 D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\appsettings.json
-D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\RuntimeData\appsettings.json
 D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\Mqtt.exe
 D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\Mqtt.deps.json
 D:\Datalogger_NUC\Mqtt\bin\Debug\net10.0\Mqtt.runtimeconfig.json
@@ -30,3 +29,4 @@ D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\staticwebassets.build.json.cache
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\staticwebassets.development.json
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\staticwebassets.build.endpoints.json
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\swae.build.ex.cache
+D:\datalogger_NUC\mqtt\bin\Debug\net10.0\RuntimeData\MqttConfig.json

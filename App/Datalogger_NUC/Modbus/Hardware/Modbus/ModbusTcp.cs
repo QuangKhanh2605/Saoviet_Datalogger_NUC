@@ -23,16 +23,12 @@ public class ModbusTcp : IModbusClient
     {
         if (string.IsNullOrWhiteSpace(ipAddress))
         {
-            throw new ArgumentException(
-                "IP Address không được rỗng.",
-                nameof(ipAddress));
+            throw new ArgumentException("IP Address không được rỗng.", nameof(ipAddress));
         }
 
         if (port <= 0 || port > 65535)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(port),
-                "Port không hợp lệ.");
+            throw new ArgumentOutOfRangeException(nameof(port), "Port không hợp lệ.");
         }
 
         _ipAddress = ipAddress.Trim();
@@ -44,9 +40,7 @@ public class ModbusTcp : IModbusClient
     // ============================================================
     public void Open()
     {
-        if (_tcpClient != null &&
-            _stream != null &&
-            _tcpClient.Connected)
+        if (_tcpClient != null && _stream != null && _tcpClient.Connected)
         {
             return;
         }
@@ -57,19 +51,17 @@ public class ModbusTcp : IModbusClient
 
         try
         {
-            Console.WriteLine(
-                $"Modbus TCP CONNECT: {_ipAddress}:{_port}");
+            Console.WriteLine($"Modbus TCP CONNECT: {_ipAddress}:{_port}");
 
-            Task connectTask =
-                client.ConnectAsync(_ipAddress, _port);
+            Task connectTask = client.ConnectAsync(_ipAddress, _port);
 
             if (!connectTask.Wait(ConnectTimeoutMilliseconds))
             {
                 client.Close();
 
                 throw new TimeoutException(
-                    $"Timeout kết nối Modbus TCP " +
-                    $"{_ipAddress}:{_port}.");
+                    $"Timeout kết nối Modbus TCP " + $"{_ipAddress}:{_port}."
+                );
             }
 
             // Đảm bảo exception từ ConnectAsync được ném ra.
@@ -77,34 +69,30 @@ public class ModbusTcp : IModbusClient
 
             NetworkStream stream = client.GetStream();
 
-            stream.ReadTimeout =
-                ReadTimeoutMilliseconds;
+            stream.ReadTimeout = ReadTimeoutMilliseconds;
 
-            stream.WriteTimeout =
-                WriteTimeoutMilliseconds;
+            stream.WriteTimeout = WriteTimeoutMilliseconds;
 
             _tcpClient = client;
             _stream = stream;
 
             _transactionId = 0;
 
-            Console.WriteLine(
-                $"Modbus TCP CONNECTED: {_ipAddress}:{_port}");
+            Console.WriteLine($"Modbus TCP CONNECTED: {_ipAddress}:{_port}");
         }
         catch (Exception ex)
         {
             Console.WriteLine(
-                $"Modbus TCP CONNECT ERROR: " +
-                $"{_ipAddress}:{_port} | " +
-                $"{ex.GetType().Name}: {ex.Message}");
+                $"Modbus TCP CONNECT ERROR: "
+                    + $"{_ipAddress}:{_port} | "
+                    + $"{ex.GetType().Name}: {ex.Message}"
+            );
 
             try
             {
                 client.Close();
             }
-            catch
-            {
-            }
+            catch { }
 
             throw;
         }
@@ -119,9 +107,7 @@ public class ModbusTcp : IModbusClient
         {
             _stream?.Close();
         }
-        catch
-        {
-        }
+        catch { }
         finally
         {
             _stream = null;
@@ -131,9 +117,7 @@ public class ModbusTcp : IModbusClient
         {
             _tcpClient?.Close();
         }
-        catch
-        {
-        }
+        catch { }
         finally
         {
             _tcpClient = null;
@@ -147,40 +131,33 @@ public class ModbusTcp : IModbusClient
         byte slaveId,
         byte functionCode,
         ushort startAddress,
-        ushort quantity)
+        ushort quantity
+    )
     {
-        ValidateReadArguments(
-            functionCode,
-            quantity);
+        ValidateReadArguments(functionCode, quantity);
 
         EnsureOpened();
 
-        ushort transactionId =
-            NextTransactionId();
+        ushort transactionId = NextTransactionId();
 
-        byte[] request =
-            BuildReadRequest(
-                transactionId,
-                slaveId,
-                functionCode,
-                startAddress,
-                quantity);
+        byte[] request = BuildReadRequest(
+            transactionId,
+            slaveId,
+            functionCode,
+            startAddress,
+            quantity
+        );
 
-        NetworkStream stream =
-            GetStream();
+        NetworkStream stream = GetStream();
 
         try
         {
             // ----------------------------------------------------
             // TCP REQUEST
             // ----------------------------------------------------
-            Console.WriteLine(
-                $"Modbus TCP TX: {BytesToHex(request)}");
+            Console.WriteLine($"Modbus TCP TX: {BytesToHex(request)}");
 
-            stream.Write(
-                request,
-                0,
-                request.Length);
+            stream.Write(request, 0, request.Length);
 
             // ----------------------------------------------------
             // MBAP 7 bytes
@@ -188,49 +165,41 @@ public class ModbusTcp : IModbusClient
             // + ByteCount 1 byte
             // = 9 bytes
             // ----------------------------------------------------
-            byte[] header =
-                ReadExact(9);
+            byte[] header = ReadExact(9);
 
-            Console.WriteLine(
-                $"Modbus TCP RX HEADER: {BytesToHex(header)}");
+            Console.WriteLine($"Modbus TCP RX HEADER: {BytesToHex(header)}");
 
-            ValidateTransactionAndProtocol(
-                header,
-                transactionId,
-                slaveId);
+            ValidateTransactionAndProtocol(header, transactionId, slaveId);
 
-            ushort length =
-                ReadUInt16(header, 4);
+            ushort length = ReadUInt16(header, 4);
 
             if (length < 2)
             {
-                throw new IOException(
-                    $"Modbus TCP Length không hợp lệ: {length}.");
+                throw new IOException($"Modbus TCP Length không hợp lệ: {length}.");
             }
 
-            byte responseFunction =
-                header[7];
+            byte responseFunction = header[7];
 
             // ----------------------------------------------------
             // EXCEPTION RESPONSE
             // ----------------------------------------------------
-            if (responseFunction ==
-                (byte)(functionCode | 0x80))
+            if (responseFunction == (byte)(functionCode | 0x80))
             {
                 if (length != 3)
                 {
                     throw new IOException(
                         $"Modbus TCP Exception Length không đúng. "
-                        + $"Expected=3, Received={length}.");
+                            + $"Expected=3, Received={length}."
+                    );
                 }
 
-                byte exceptionCode =
-                    header[8];
+                byte exceptionCode = header[8];
 
                 throw new IOException(
                     $"Modbus TCP Exception. "
-                    + $"Function={functionCode}, "
-                    + $"ExceptionCode={exceptionCode}.");
+                        + $"Function={functionCode}, "
+                        + $"ExceptionCode={exceptionCode}."
+                );
             }
 
             // ----------------------------------------------------
@@ -240,25 +209,25 @@ public class ModbusTcp : IModbusClient
             {
                 throw new IOException(
                     $"Modbus TCP Function Code không đúng. "
-                    + $"Expected={functionCode}, "
-                    + $"Received={responseFunction}.");
+                        + $"Expected={functionCode}, "
+                        + $"Received={responseFunction}."
+                );
             }
 
             // ----------------------------------------------------
             // BYTE COUNT
             // ----------------------------------------------------
-            byte byteCount =
-                header[8];
+            byte byteCount = header[8];
 
-            int expectedByteCount =
-                checked(quantity * 2);
+            int expectedByteCount = checked(quantity * 2);
 
             if (byteCount != expectedByteCount)
             {
                 throw new IOException(
                     $"Modbus TCP Byte Count không đúng. "
-                    + $"Expected={expectedByteCount}, "
-                    + $"Received={byteCount}.");
+                        + $"Expected={expectedByteCount}, "
+                        + $"Received={byteCount}."
+                );
             }
 
             // ----------------------------------------------------
@@ -271,62 +240,47 @@ public class ModbusTcp : IModbusClient
             //
             // => 3 + byteCount
             // ----------------------------------------------------
-            ushort expectedLength =
-                checked((ushort)(3 + byteCount));
+            ushort expectedLength = checked((ushort)(3 + byteCount));
 
             if (length != expectedLength)
             {
                 throw new IOException(
                     $"Modbus TCP Length không đúng. "
-                    + $"Expected={expectedLength}, "
-                    + $"Received={length}.");
+                        + $"Expected={expectedLength}, "
+                        + $"Received={length}."
+                );
             }
 
             // ----------------------------------------------------
             // DATA
             // ----------------------------------------------------
-            byte[] data =
-                ReadExact(byteCount);
+            byte[] data = ReadExact(byteCount);
 
-            Console.WriteLine(
-                $"Modbus TCP RX DATA: {BytesToHex(data)}");
+            Console.WriteLine($"Modbus TCP RX DATA: {BytesToHex(data)}");
 
             // ----------------------------------------------------
             // FULL RESPONSE
             // ----------------------------------------------------
-            byte[] fullResponse =
-                new byte[header.Length + data.Length];
+            byte[] fullResponse = new byte[header.Length + data.Length];
 
-            Buffer.BlockCopy(
-                header,
-                0,
-                fullResponse,
-                0,
-                header.Length);
+            Buffer.BlockCopy(header, 0, fullResponse, 0, header.Length);
 
-            Buffer.BlockCopy(
-                data,
-                0,
-                fullResponse,
-                header.Length,
-                data.Length);
+            Buffer.BlockCopy(data, 0, fullResponse, header.Length, data.Length);
 
-            Console.WriteLine(
-                $"Modbus TCP RX: {BytesToHex(fullResponse)}");
+            Console.WriteLine($"Modbus TCP RX: {BytesToHex(fullResponse)}");
 
-            return ParseRegisters(
-                data,
-                quantity);
+            return ParseRegisters(data, quantity);
         }
         catch (Exception ex)
         {
             Console.WriteLine(
-                $"Modbus TCP READ ERROR: " +
-                $"StationSlave={slaveId} | " +
-                $"Function={functionCode} | " +
-                $"Address=0x{startAddress:X4} | " +
-                $"Quantity={quantity} | " +
-                $"{ex.GetType().Name}: {ex.Message}");
+                $"Modbus TCP READ ERROR: "
+                    + $"StationSlave={slaveId} | "
+                    + $"Function={functionCode} | "
+                    + $"Address=0x{startAddress:X4} | "
+                    + $"Quantity={quantity} | "
+                    + $"{ex.GetType().Name}: {ex.Message}"
+            );
 
             // Connection có thể đã hỏng.
             // Không giữ socket lỗi để lần đọc sau
@@ -345,43 +299,35 @@ public class ModbusTcp : IModbusClient
         byte slaveId,
         byte functionCode,
         ushort startAddress,
-        ushort[] values)
+        ushort[] values
+    )
     {
-        ValidateWriteArguments(
-            functionCode,
-            values);
+        ValidateWriteArguments(functionCode, values);
 
         EnsureOpened();
 
-        ushort quantity =
-            (ushort)values.Length;
+        ushort quantity = (ushort)values.Length;
 
-        ushort transactionId =
-            NextTransactionId();
+        ushort transactionId = NextTransactionId();
 
-        byte[] request =
-            BuildWriteRequest(
-                transactionId,
-                slaveId,
-                functionCode,
-                startAddress,
-                values);
+        byte[] request = BuildWriteRequest(
+            transactionId,
+            slaveId,
+            functionCode,
+            startAddress,
+            values
+        );
 
-        NetworkStream stream =
-            GetStream();
+        NetworkStream stream = GetStream();
 
         try
         {
             // ----------------------------------------------------
             // TCP REQUEST
             // ----------------------------------------------------
-            Console.WriteLine(
-                $"Modbus TCP TX: {BytesToHex(request)}");
+            Console.WriteLine($"Modbus TCP TX: {BytesToHex(request)}");
 
-            stream.Write(
-                request,
-                0,
-                request.Length);
+            stream.Write(request, 0, request.Length);
 
             // ----------------------------------------------------
             // Write Multiple Registers response:
@@ -396,43 +342,36 @@ public class ModbusTcp : IModbusClient
             //
             // Total = 12 bytes
             // ----------------------------------------------------
-            byte[] response =
-                ReadExact(12);
+            byte[] response = ReadExact(12);
 
-            Console.WriteLine(
-                $"Modbus TCP RX: {BytesToHex(response)}");
+            Console.WriteLine($"Modbus TCP RX: {BytesToHex(response)}");
 
-            ValidateTransactionAndProtocol(
-                response,
-                transactionId,
-                slaveId);
+            ValidateTransactionAndProtocol(response, transactionId, slaveId);
 
-            ushort length =
-                ReadUInt16(response, 4);
+            ushort length = ReadUInt16(response, 4);
 
-            byte responseFunction =
-                response[7];
+            byte responseFunction = response[7];
 
             // ----------------------------------------------------
             // EXCEPTION
             // ----------------------------------------------------
-            if (responseFunction ==
-                (byte)(functionCode | 0x80))
+            if (responseFunction == (byte)(functionCode | 0x80))
             {
                 if (length != 3)
                 {
                     throw new IOException(
                         $"Modbus TCP Write Exception Length không đúng. "
-                        + $"Expected=3, Received={length}.");
+                            + $"Expected=3, Received={length}."
+                    );
                 }
 
-                byte exceptionCode =
-                    response[8];
+                byte exceptionCode = response[8];
 
                 throw new IOException(
                     $"Modbus TCP Exception khi ghi. "
-                    + $"Function={functionCode}, "
-                    + $"ExceptionCode={exceptionCode}.");
+                        + $"Function={functionCode}, "
+                        + $"ExceptionCode={exceptionCode}."
+                );
             }
 
             // ----------------------------------------------------
@@ -442,8 +381,9 @@ public class ModbusTcp : IModbusClient
             {
                 throw new IOException(
                     $"Modbus TCP Function Code không đúng khi ghi. "
-                    + $"Expected={functionCode}, "
-                    + $"Received={responseFunction}.");
+                        + $"Expected={functionCode}, "
+                        + $"Received={responseFunction}."
+                );
             }
 
             // ----------------------------------------------------
@@ -452,47 +392,48 @@ public class ModbusTcp : IModbusClient
             if (length != 6)
             {
                 throw new IOException(
-                    $"Modbus TCP Write Length không đúng. "
-                    + $"Expected=6, Received={length}.");
+                    $"Modbus TCP Write Length không đúng. " + $"Expected=6, Received={length}."
+                );
             }
 
             // ----------------------------------------------------
             // START ADDRESS
             // ----------------------------------------------------
-            ushort returnedStartAddress =
-                ReadUInt16(response, 8);
+            ushort returnedStartAddress = ReadUInt16(response, 8);
 
             if (returnedStartAddress != startAddress)
             {
                 throw new IOException(
                     $"Start Address trả về không đúng khi ghi. "
-                    + $"Expected={startAddress}, "
-                    + $"Received={returnedStartAddress}.");
+                        + $"Expected={startAddress}, "
+                        + $"Received={returnedStartAddress}."
+                );
             }
 
             // ----------------------------------------------------
             // QUANTITY
             // ----------------------------------------------------
-            ushort returnedQuantity =
-                ReadUInt16(response, 10);
+            ushort returnedQuantity = ReadUInt16(response, 10);
 
             if (returnedQuantity != quantity)
             {
                 throw new IOException(
                     $"Quantity trả về không đúng khi ghi. "
-                    + $"Expected={quantity}, "
-                    + $"Received={returnedQuantity}.");
+                        + $"Expected={quantity}, "
+                        + $"Received={returnedQuantity}."
+                );
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine(
-                $"Modbus TCP WRITE ERROR: " +
-                $"Slave={slaveId} | " +
-                $"Function={functionCode} | " +
-                $"Address=0x{startAddress:X4} | " +
-                $"Quantity={quantity} | " +
-                $"{ex.GetType().Name}: {ex.Message}");
+                $"Modbus TCP WRITE ERROR: "
+                    + $"Slave={slaveId} | "
+                    + $"Function={functionCode} | "
+                    + $"Address=0x{startAddress:X4} | "
+                    + $"Quantity={quantity} | "
+                    + $"{ex.GetType().Name}: {ex.Message}"
+            );
 
             Close();
 
@@ -503,65 +444,57 @@ public class ModbusTcp : IModbusClient
     // ============================================================
     // VALIDATE READ ARGUMENTS
     // ============================================================
-    private static void ValidateReadArguments(
-        byte functionCode,
-        ushort quantity)
+    private static void ValidateReadArguments(byte functionCode, ushort quantity)
     {
-        if (functionCode != 3 &&
-            functionCode != 4)
+        if (functionCode != 3 && functionCode != 4)
         {
             throw new NotSupportedException(
-                $"Modbus TCP chưa hỗ trợ Function Code {functionCode}.");
+                $"Modbus TCP chưa hỗ trợ Function Code {functionCode}."
+            );
         }
 
         if (quantity == 0)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(quantity),
-                "Quantity phải lớn hơn 0.");
+            throw new ArgumentOutOfRangeException(nameof(quantity), "Quantity phải lớn hơn 0.");
         }
 
         if (quantity > MaxReadRegisters)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(quantity),
-                $"Quantity đọc tối đa là {MaxReadRegisters}.");
+                $"Quantity đọc tối đa là {MaxReadRegisters}."
+            );
         }
     }
 
     // ============================================================
     // VALIDATE WRITE ARGUMENTS
     // ============================================================
-    private static void ValidateWriteArguments(
-        byte functionCode,
-        ushort[] values)
+    private static void ValidateWriteArguments(byte functionCode, ushort[] values)
     {
         if (functionCode != 16)
         {
             throw new NotSupportedException(
-                $"Modbus TCP chỉ hỗ trợ ghi bằng Function Code 16. "
-                + $"Nhận {functionCode}.");
+                $"Modbus TCP chỉ hỗ trợ ghi bằng Function Code 16. " + $"Nhận {functionCode}."
+            );
         }
 
         if (values == null)
         {
-            throw new ArgumentNullException(
-                nameof(values));
+            throw new ArgumentNullException(nameof(values));
         }
 
         if (values.Length == 0)
         {
-            throw new ArgumentException(
-                "Không có giá trị để ghi.",
-                nameof(values));
+            throw new ArgumentException("Không có giá trị để ghi.", nameof(values));
         }
 
         if (values.Length > MaxWriteRegisters)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(values),
-                $"Function Code 16 chỉ cho phép tối đa "
-                + $"{MaxWriteRegisters} registers.");
+                $"Function Code 16 chỉ cho phép tối đa " + $"{MaxWriteRegisters} registers."
+            );
         }
     }
 
@@ -573,22 +506,16 @@ public class ModbusTcp : IModbusClient
         byte slaveId,
         byte functionCode,
         ushort startAddress,
-        ushort quantity)
+        ushort quantity
+    )
     {
-        byte[] request =
-            new byte[12];
+        byte[] request = new byte[12];
 
         // Transaction ID
-        WriteUInt16(
-            request,
-            0,
-            transactionId);
+        WriteUInt16(request, 0, transactionId);
 
         // Protocol ID = 0
-        WriteUInt16(
-            request,
-            2,
-            0);
+        WriteUInt16(request, 2, 0);
 
         // Length = Unit ID + PDU
         //
@@ -598,30 +525,19 @@ public class ModbusTcp : IModbusClient
         // Quantity      2
         //
         // = 6
-        WriteUInt16(
-            request,
-            4,
-            6);
+        WriteUInt16(request, 4, 6);
 
         // Unit ID
-        request[6] =
-            slaveId;
+        request[6] = slaveId;
 
         // Function
-        request[7] =
-            functionCode;
+        request[7] = functionCode;
 
         // Start Address
-        WriteUInt16(
-            request,
-            8,
-            startAddress);
+        WriteUInt16(request, 8, startAddress);
 
         // Quantity
-        WriteUInt16(
-            request,
-            10,
-            quantity);
+        WriteUInt16(request, 10, quantity);
 
         return request;
     }
@@ -634,13 +550,12 @@ public class ModbusTcp : IModbusClient
         byte slaveId,
         byte functionCode,
         ushort startAddress,
-        ushort[] values)
+        ushort[] values
+    )
     {
-        ushort quantity =
-            (ushort)values.Length;
+        ushort quantity = (ushort)values.Length;
 
-        byte byteCount =
-            checked((byte)(quantity * 2));
+        byte byteCount = checked((byte)(quantity * 2));
 
         // Unit ID
         // Function
@@ -650,63 +565,38 @@ public class ModbusTcp : IModbusClient
         // Data
         //
         // = 7 + byteCount
-        ushort length =
-            checked((ushort)(7 + byteCount));
+        ushort length = checked((ushort)(7 + byteCount));
 
-        byte[] request =
-            new byte[6 + length];
+        byte[] request = new byte[6 + length];
 
         // Transaction ID
-        WriteUInt16(
-            request,
-            0,
-            transactionId);
+        WriteUInt16(request, 0, transactionId);
 
         // Protocol ID
-        WriteUInt16(
-            request,
-            2,
-            0);
+        WriteUInt16(request, 2, 0);
 
         // Length
-        WriteUInt16(
-            request,
-            4,
-            length);
+        WriteUInt16(request, 4, length);
 
         // Unit ID
-        request[6] =
-            slaveId;
+        request[6] = slaveId;
 
         // Function
-        request[7] =
-            functionCode;
+        request[7] = functionCode;
 
         // Start Address
-        WriteUInt16(
-            request,
-            8,
-            startAddress);
+        WriteUInt16(request, 8, startAddress);
 
         // Quantity
-        WriteUInt16(
-            request,
-            10,
-            quantity);
+        WriteUInt16(request, 10, quantity);
 
         // Byte Count
-        request[12] =
-            byteCount;
+        request[12] = byteCount;
 
         // Data
-        for (int i = 0;
-             i < values.Length;
-             i++)
+        for (int i = 0; i < values.Length; i++)
         {
-            WriteUInt16(
-                request,
-                13 + i * 2,
-                values[i]);
+            WriteUInt16(request, 13 + i * 2, values[i]);
         }
 
         return request;
@@ -718,51 +608,46 @@ public class ModbusTcp : IModbusClient
     private static void ValidateTransactionAndProtocol(
         byte[] response,
         ushort expectedTransactionId,
-        byte expectedUnitId)
+        byte expectedUnitId
+    )
     {
         if (response.Length < 9)
         {
-            throw new IOException(
-                "Modbus TCP response quá ngắn.");
+            throw new IOException("Modbus TCP response quá ngắn.");
         }
 
         // --------------------------------------------------------
         // TRANSACTION ID
         // --------------------------------------------------------
-        ushort transactionId =
-            ReadUInt16(response, 0);
+        ushort transactionId = ReadUInt16(response, 0);
 
         if (transactionId != expectedTransactionId)
         {
             throw new IOException(
                 $"Transaction ID Modbus TCP không đúng. "
-                + $"Expected={expectedTransactionId}, "
-                + $"Received={transactionId}.");
+                    + $"Expected={expectedTransactionId}, "
+                    + $"Received={transactionId}."
+            );
         }
 
         // --------------------------------------------------------
         // PROTOCOL ID
         // --------------------------------------------------------
-        ushort protocolId =
-            ReadUInt16(response, 2);
+        ushort protocolId = ReadUInt16(response, 2);
 
         if (protocolId != 0)
         {
-            throw new IOException(
-                $"Protocol ID Modbus TCP không đúng: "
-                + $"{protocolId}.");
+            throw new IOException($"Protocol ID Modbus TCP không đúng: " + $"{protocolId}.");
         }
 
         // --------------------------------------------------------
         // LENGTH
         // --------------------------------------------------------
-        ushort length =
-            ReadUInt16(response, 4);
+        ushort length = ReadUInt16(response, 4);
 
         if (length < 2)
         {
-            throw new IOException(
-                $"MBAP Length không hợp lệ: {length}.");
+            throw new IOException($"MBAP Length không hợp lệ: {length}.");
         }
 
         // --------------------------------------------------------
@@ -772,43 +657,35 @@ public class ModbusTcp : IModbusClient
         {
             throw new IOException(
                 $"Unit ID Modbus TCP không đúng. "
-                + $"Expected={expectedUnitId}, "
-                + $"Received={response[6]}.");
+                    + $"Expected={expectedUnitId}, "
+                    + $"Received={response[6]}."
+            );
         }
     }
 
     // ============================================================
     // PARSE REGISTERS
     // ============================================================
-    private static ushort[] ParseRegisters(
-        byte[] data,
-        ushort quantity)
+    private static ushort[] ParseRegisters(byte[] data, ushort quantity)
     {
-        int expectedLength =
-            checked(quantity * 2);
+        int expectedLength = checked(quantity * 2);
 
         if (data.Length != expectedLength)
         {
             throw new IOException(
                 $"Số byte register không đúng. "
-                + $"Expected={expectedLength}, "
-                + $"Received={data.Length}.");
+                    + $"Expected={expectedLength}, "
+                    + $"Received={data.Length}."
+            );
         }
 
-        ushort[] registers =
-            new ushort[quantity];
+        ushort[] registers = new ushort[quantity];
 
-        for (int i = 0;
-             i < quantity;
-             i++)
+        for (int i = 0; i < quantity; i++)
         {
-            int index =
-                i * 2;
+            int index = i * 2;
 
-            registers[i] =
-                (ushort)(
-                    (data[index] << 8)
-                    | data[index + 1]);
+            registers[i] = (ushort)((data[index] << 8) | data[index + 1]);
         }
 
         return registers;
@@ -821,15 +698,12 @@ public class ModbusTcp : IModbusClient
     {
         if (length <= 0)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(length));
+            throw new ArgumentOutOfRangeException(nameof(length));
         }
 
-        NetworkStream stream =
-            GetStream();
+        NetworkStream stream = GetStream();
 
-        byte[] buffer =
-            new byte[length];
+        byte[] buffer = new byte[length];
 
         int offset = 0;
 
@@ -839,23 +713,16 @@ public class ModbusTcp : IModbusClient
 
             try
             {
-                read =
-                    stream.Read(
-                        buffer,
-                        offset,
-                        length - offset);
+                read = stream.Read(buffer, offset, length - offset);
             }
             catch (IOException ex)
             {
-                throw new IOException(
-                    "Lỗi đọc dữ liệu Modbus TCP.",
-                    ex);
+                throw new IOException("Lỗi đọc dữ liệu Modbus TCP.", ex);
             }
 
             if (read <= 0)
             {
-                throw new IOException(
-                    "Modbus TCP connection đã đóng.");
+                throw new IOException("Modbus TCP connection đã đóng.");
             }
 
             offset += read;
@@ -871,8 +738,7 @@ public class ModbusTcp : IModbusClient
     {
         if (_stream == null)
         {
-            throw new InvalidOperationException(
-                "Modbus TCP chưa được mở.");
+            throw new InvalidOperationException("Modbus TCP chưa được mở.");
         }
 
         return _stream;
@@ -880,12 +746,9 @@ public class ModbusTcp : IModbusClient
 
     private void EnsureOpened()
     {
-        if (_tcpClient == null ||
-            _stream == null ||
-            !_tcpClient.Connected)
+        if (_tcpClient == null || _stream == null || !_tcpClient.Connected)
         {
-            throw new InvalidOperationException(
-                "Modbus TCP chưa được mở hoặc connection đã mất.");
+            throw new InvalidOperationException("Modbus TCP chưa được mở hoặc connection đã mất.");
         }
     }
 
@@ -912,37 +775,26 @@ public class ModbusTcp : IModbusClient
     // ============================================================
     private static string BytesToHex(byte[] bytes)
     {
-        if (bytes == null ||
-            bytes.Length == 0)
+        if (bytes == null || bytes.Length == 0)
         {
             return "(empty)";
         }
 
-        return Convert.ToHexString(bytes)
-            .Replace("-", " ");
+        return Convert.ToHexString(bytes).Replace("-", " ");
     }
 
     // ============================================================
     // BIG-ENDIAN HELPERS
     // ============================================================
-    private static ushort ReadUInt16(
-        byte[] buffer,
-        int offset)
+    private static ushort ReadUInt16(byte[] buffer, int offset)
     {
-        return (ushort)(
-            (buffer[offset] << 8)
-            | buffer[offset + 1]);
+        return (ushort)((buffer[offset] << 8) | buffer[offset + 1]);
     }
 
-    private static void WriteUInt16(
-        byte[] buffer,
-        int offset,
-        ushort value)
+    private static void WriteUInt16(byte[] buffer, int offset, ushort value)
     {
-        buffer[offset] =
-            (byte)(value >> 8);
+        buffer[offset] = (byte)(value >> 8);
 
-        buffer[offset + 1] =
-            (byte)(value & 0xFF);
+        buffer[offset + 1] = (byte)(value & 0xFF);
     }
 }

@@ -2,7 +2,7 @@ namespace Ftp.Models;
 
 public class SensorReading
 {
-    public string ParameterName { get; set; } = "";
+    public string Name { get; set; } = "";
 
     public double Value { get; set; }
 

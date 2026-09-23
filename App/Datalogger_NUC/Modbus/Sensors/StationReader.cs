@@ -1,7 +1,7 @@
+using Microsoft.Extensions.Logging;
 using Modbus.Decoders;
 using Modbus.Hardware;
 using Modbus.Models;
-using Microsoft.Extensions.Logging;
 
 namespace Modbus.Sensors;
 
@@ -204,7 +204,7 @@ public class StationReader
     private static double GetWriteSourceValue(WriteDefinition write, List<SensorReading> readings)
     {
         SensorReading? source = readings.FirstOrDefault(x =>
-            x.ParameterName.Equals(write.Source.Parameter, StringComparison.OrdinalIgnoreCase)
+            x.Name.Equals(write.Source.Parameter, StringComparison.OrdinalIgnoreCase)
         );
 
         if (source != null && source.Status == StatusCode.Ok)
@@ -370,7 +370,7 @@ public class StationReader
 
         foreach (var parameterEntry in parametersByName)
         {
-            string parameterName = parameterEntry.Key;
+            string Name = parameterEntry.Key;
 
             ParameterDefinition parameter = parameterEntry.Value.Parameter;
 
@@ -393,7 +393,7 @@ public class StationReader
             // =================================================
 
             List<(StatusDefinition Status, RegisterBlockDefinition Block)> statuses =
-                FindStatusesForParameter(slave, parameterName);
+                FindStatusesForParameter(slave, Name);
 
             // =================================================
             // KIỂM TRA STATUS BLOCK
@@ -485,7 +485,7 @@ public class StationReader
                     "READ OK | Station={Station} | Slave={Slave} | Parameter={Parameter} | Value={Value} | Unit={Unit} | Status={Status}",
                     reading.StationName,
                     reading.SlaveId,
-                    reading.ParameterName,
+                    reading.Name,
                     reading.Value,
                     reading.Unit,
                     reading.Status
@@ -497,7 +497,7 @@ public class StationReader
                     "READ ERROR | Station={Station} | Slave={Slave} | Parameter={Parameter} | Value={Value} | Unit={Unit} | Status={Status}",
                     reading.StationName,
                     reading.SlaveId,
-                    reading.ParameterName,
+                    reading.Name,
                     reading.Value,
                     reading.Unit,
                     reading.Status
@@ -525,7 +525,7 @@ public class StationReader
     private static List<(
         StatusDefinition Status,
         RegisterBlockDefinition Block
-    )> FindStatusesForParameter(SlaveDefinition slave, string parameterName)
+    )> FindStatusesForParameter(SlaveDefinition slave, string Name)
     {
         List<(StatusDefinition Status, RegisterBlockDefinition Block)> result = new();
 
@@ -533,7 +533,7 @@ public class StationReader
         {
             foreach (StatusDefinition status in block.Statuses)
             {
-                if (status.Parameter.Equals(parameterName, StringComparison.OrdinalIgnoreCase))
+                if (status.Parameter.Equals(Name, StringComparison.OrdinalIgnoreCase))
                 {
                     result.Add((status, block));
                 }
@@ -792,7 +792,7 @@ public class StationReader
 
             SlaveId = slaveId,
 
-            ParameterName = parameter.Name,
+            Name = parameter.Name,
 
             Value = Math.Round(value, 3),
 

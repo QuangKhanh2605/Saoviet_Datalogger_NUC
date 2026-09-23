@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "DFd++CtgvsM=",
+  "dgSpecHash": "rITw2jM5Tck=",
   "success": true,
-  "projectFilePath": "D:\\Datalogger_NUC\\Database\\Database.csproj",
+  "projectFilePath": "D:\\Datalogger_NUC\\database\\Database.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\PC\\.nuget\\packages\\microsoft.data.sqlite\\10.0.11\\microsoft.data.sqlite.10.0.11.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\microsoft.data.sqlite.core\\10.0.11\\microsoft.data.sqlite.core.10.0.11.nupkg.sha512",

@@ -10,11 +10,11 @@ public class ReadingStore
 
     private readonly object _errorLock = new();
 
-    private readonly Dictionary<string, int> _parameterErrorCounts =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _parameterErrorCounts = new(
+        StringComparer.OrdinalIgnoreCase
+    );
 
-    public void UpdateReadings(
-        List<SensorReading> readings)
+    public void UpdateReadings(List<SensorReading> readings)
     {
         lock (_readingLock)
         {
@@ -25,8 +25,7 @@ public class ReadingStore
         }
     }
 
-    public void UpdateReading(
-        SensorReading reading)
+    public void UpdateReading(SensorReading reading)
     {
         lock (_readingLock)
         {
@@ -34,22 +33,13 @@ public class ReadingStore
         }
     }
 
-    private void UpdateReadingInternal(
-        SensorReading reading)
+    private void UpdateReadingInternal(SensorReading reading)
     {
-        int index = _latestReadings.FindIndex(
-            x =>
-                string.Equals(
-                    x.StationName,
-                    reading.StationName,
-                    StringComparison.OrdinalIgnoreCase)
-                &&
-                x.SlaveId == reading.SlaveId
-                &&
-                string.Equals(
-                    x.ParameterName,
-                    reading.ParameterName,
-                    StringComparison.OrdinalIgnoreCase));
+        int index = _latestReadings.FindIndex(x =>
+            string.Equals(x.StationName, reading.StationName, StringComparison.OrdinalIgnoreCase)
+            && x.SlaveId == reading.SlaveId
+            && string.Equals(x.Name, reading.Name, StringComparison.OrdinalIgnoreCase)
+        );
 
         if (index >= 0)
         {
@@ -65,55 +55,31 @@ public class ReadingStore
     {
         lock (_readingLock)
         {
-            return _latestReadings
-                .Select(CloneReading)
-                .ToList();
+            return _latestReadings.Select(CloneReading).ToList();
         }
     }
 
-    public SensorReading? GetLatestReading(
-        string stationName,
-        byte slaveId,
-        string parameterName)
+    public SensorReading? GetLatestReading(string stationName, byte slaveId, string Name)
     {
         lock (_readingLock)
         {
-            SensorReading? reading =
-                _latestReadings.FirstOrDefault(
-                    x =>
-                        string.Equals(
-                            x.StationName,
-                            stationName,
-                            StringComparison.OrdinalIgnoreCase)
-                        &&
-                        x.SlaveId == slaveId
-                        &&
-                        string.Equals(
-                            x.ParameterName,
-                            parameterName,
-                            StringComparison.OrdinalIgnoreCase));
+            SensorReading? reading = _latestReadings.FirstOrDefault(x =>
+                string.Equals(x.StationName, stationName, StringComparison.OrdinalIgnoreCase)
+                && x.SlaveId == slaveId
+                && string.Equals(x.Name, Name, StringComparison.OrdinalIgnoreCase)
+            );
 
-            return reading == null
-                ? null
-                : CloneReading(reading);
+            return reading == null ? null : CloneReading(reading);
         }
     }
 
-    public int IncrementParameterErrorCount(
-        string stationName,
-        byte slaveId,
-        string parameterName)
+    public int IncrementParameterErrorCount(string stationName, byte slaveId, string Name)
     {
-        string key = BuildParameterKey(
-            stationName,
-            slaveId,
-            parameterName);
+        string key = BuildParameterKey(stationName, slaveId, Name);
 
         lock (_errorLock)
         {
-            if (!_parameterErrorCounts.TryGetValue(
-                    key,
-                    out int count))
+            if (!_parameterErrorCounts.TryGetValue(key, out int count))
             {
                 count = 0;
             }
@@ -126,35 +92,19 @@ public class ReadingStore
         }
     }
 
-    public int GetParameterErrorCount(
-        string stationName,
-        byte slaveId,
-        string parameterName)
+    public int GetParameterErrorCount(string stationName, byte slaveId, string Name)
     {
-        string key = BuildParameterKey(
-            stationName,
-            slaveId,
-            parameterName);
+        string key = BuildParameterKey(stationName, slaveId, Name);
 
         lock (_errorLock)
         {
-            return _parameterErrorCounts.TryGetValue(
-                key,
-                out int count)
-                ? count
-                : 0;
+            return _parameterErrorCounts.TryGetValue(key, out int count) ? count : 0;
         }
     }
 
-    public void ResetParameterErrorCount(
-        string stationName,
-        byte slaveId,
-        string parameterName)
+    public void ResetParameterErrorCount(string stationName, byte slaveId, string Name)
     {
-        string key = BuildParameterKey(
-            stationName,
-            slaveId,
-            parameterName);
+        string key = BuildParameterKey(stationName, slaveId, Name);
 
         lock (_errorLock)
         {
@@ -162,26 +112,22 @@ public class ReadingStore
         }
     }
 
-    private static string BuildParameterKey(
-        string stationName,
-        byte slaveId,
-        string parameterName)
+    private static string BuildParameterKey(string stationName, byte slaveId, string Name)
     {
-        return $"{stationName}|{slaveId}|{parameterName}";
+        return $"{stationName}|{slaveId}|{Name}";
     }
 
-    private static SensorReading CloneReading(
-        SensorReading reading)
+    private static SensorReading CloneReading(SensorReading reading)
     {
         return new SensorReading
         {
             StationName = reading.StationName,
             SlaveId = reading.SlaveId,
-            ParameterName = reading.ParameterName,
+            Name = reading.Name,
             Value = reading.Value,
             Unit = reading.Unit,
             Status = reading.Status,
-            Timestamp = reading.Timestamp
+            Timestamp = reading.Timestamp,
         };
     }
 }

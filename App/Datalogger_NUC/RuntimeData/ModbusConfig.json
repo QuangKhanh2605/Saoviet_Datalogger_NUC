@@ -1,0 +1,12 @@
+{
+    "Device": {
+        "Id": "SVWMPC26009999",
+        "Ver": "SVC_NUC_LINUX_V1_1_0"
+    },
+    "Web": {
+        "Port": 5000
+    },
+    "Sensor": {
+        "ReadIntervalSeconds": 3
+    }
+}

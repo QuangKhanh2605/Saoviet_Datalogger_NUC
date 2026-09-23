@@ -17,7 +17,8 @@ public class FtpService
         string remoteFileName,
         byte[] data,
         DateTime packageTimestamp,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         if (server is null)
             throw new ArgumentNullException(nameof(server));
@@ -35,15 +36,12 @@ public class FtpService
             server.Path,
             remoteFileName,
             server.ModePath,
-            packageTimestamp);
+            packageTimestamp
+        );
 
         try
         {
-            using var client = new AsyncFtpClient(
-                server.IP,
-                server.User,
-                server.Pass,
-                server.Port);
+            using var client = new AsyncFtpClient(server.IP, server.User, server.Pass, server.Port);
 
             client.Config.ConnectTimeout = 10000;
             client.Config.ReadTimeout = 10000;
@@ -56,7 +54,8 @@ public class FtpService
                 remotePath,
                 FtpRemoteExists.Overwrite,
                 true,
-                token: cancellationToken);
+                token: cancellationToken
+            );
 
             await client.Disconnect(cancellationToken);
 
@@ -65,7 +64,8 @@ public class FtpService
                 _logger.LogInformation(
                     "FTP upload thành công. Server={Server}, File={File}",
                     server.IP,
-                    remotePath);
+                    remotePath
+                );
 
                 return true;
             }
@@ -74,7 +74,8 @@ public class FtpService
                 "FTP upload thất bại. Server={Server}, File={File}, Status={Status}",
                 server.IP,
                 remotePath,
-                status);
+                status
+            );
 
             return false;
         }
@@ -88,7 +89,8 @@ public class FtpService
                 ex,
                 "FTP upload lỗi. Server={Server}, File={File}",
                 server.IP,
-                remotePath);
+                remotePath
+            );
 
             return false;
         }
@@ -98,25 +100,24 @@ public class FtpService
         string directory,
         string fileName,
         int modePath,
-        DateTime packageTimestamp)
+        DateTime packageTimestamp
+    )
     {
-        string baseDirectory =
-            directory?.TrimEnd('/') ?? "";
+        string baseDirectory = directory?.TrimEnd('/') ?? "";
 
         string remoteDirectory = modePath switch
         {
             0 => baseDirectory,
 
-            1 =>
-                $"{baseDirectory}/{packageTimestamp:yyyyMMdd}",
+            1 => $"{baseDirectory}/{packageTimestamp:yyyyMMdd}",
 
-            2 =>
-                $"{baseDirectory}/{packageTimestamp:yyyy/MM/dd}",
+            2 => $"{baseDirectory}/{packageTimestamp:yyyy/MM/dd}",
 
             _ => throw new ArgumentOutOfRangeException(
                 nameof(modePath),
                 modePath,
-                "ModePath phải là 0, 1 hoặc 2.")
+                "ModePath phải là 0, 1 hoặc 2."
+            ),
         };
 
         if (string.IsNullOrWhiteSpace(remoteDirectory))

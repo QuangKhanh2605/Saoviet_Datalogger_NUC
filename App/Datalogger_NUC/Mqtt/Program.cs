@@ -10,35 +10,32 @@ var builder = WebApplication.CreateBuilder(args);
 // RUNTIME DATA CONFIGURATION
 // ============================================================
 
-builder.Configuration
-    .SetBasePath(AppContext.BaseDirectory)
+builder
+    .Configuration.SetBasePath(Directory.GetCurrentDirectory())
     .AddJsonFile(
-        Path.Combine("RuntimeData", "appsettings.json"),
+        Path.Combine("RuntimeData", "MqttConfig.json"),
         optional: false,
-        reloadOnChange: true);
+        reloadOnChange: true
+    );
 
 // ============================================================
 // WEB PORT
 // ============================================================
 
-int webPort =
-    builder.Configuration.GetValue<int>("Web:Port");
+int webPort = builder.Configuration.GetValue<int>("Web:Port");
 
 if (webPort <= 0)
 {
-    throw new InvalidOperationException(
-        "Web:Port is not configured or invalid.");
+    throw new InvalidOperationException("Web:Port is not configured or invalid.");
 }
 
-builder.WebHost.UseUrls(
-    $"http://0.0.0.0:{webPort}");
+builder.WebHost.UseUrls($"http://0.0.0.0:{webPort}");
 
 // ============================================================
 // APP SETTINGS
 // ============================================================
 
-builder.Services.Configure<AppSettings>(
-    builder.Configuration);
+builder.Services.Configure<AppSettings>(builder.Configuration);
 
 // ============================================================
 // DATABASE API
@@ -48,22 +45,18 @@ builder.Services.AddHttpClient(
     "DatabaseApi",
     client =>
     {
-        string? baseUrl =
-            builder.Configuration["DatabaseApi:BaseUrl"];
+        string? baseUrl = builder.Configuration["DatabaseApi:BaseUrl"];
 
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
-            throw new InvalidOperationException(
-                "DatabaseApi:BaseUrl is not configured.");
+            throw new InvalidOperationException("DatabaseApi:BaseUrl is not configured.");
         }
 
-        client.BaseAddress = new Uri(
-            baseUrl.EndsWith("/")
-                ? baseUrl
-                : baseUrl + "/");
+        client.BaseAddress = new Uri(baseUrl.EndsWith("/") ? baseUrl : baseUrl + "/");
 
         client.Timeout = TimeSpan.FromSeconds(10);
-    });
+    }
+);
 
 // ============================================================
 // MQTT CORE
@@ -102,34 +95,10 @@ builder.Services.AddHostedService<MqttWorker>();
 var app = builder.Build();
 
 // ============================================================
-// HEALTH
+// API
 // ============================================================
 
-app.MapGet(
-    "/health",
-    () =>
-    {
-        return Results.Ok(new
-        {
-            service = "Mqtt",
-            status = "healthy"
-        });
-    });
-
-// ============================================================
-// ROOT
-// ============================================================
-
-app.MapGet(
-    "/",
-    () =>
-    {
-        return Results.Ok(new
-        {
-            service = "Mqtt",
-            status = "running"
-        });
-    });
+MqttApi.Map(app);
 
 // ============================================================
 // RUN
