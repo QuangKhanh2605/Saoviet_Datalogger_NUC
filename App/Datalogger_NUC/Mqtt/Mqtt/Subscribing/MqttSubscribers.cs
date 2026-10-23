@@ -73,24 +73,8 @@ public sealed class MqttSubscriber
                     {
                         await SubscribeAllAsync(cancellationToken);
 
-                        /*
-                         * Subscribe thành công.
-                         *
-                         * Connection hiện tại:
-                         *
-                         * MQTT CONNECTED
-                         * +
-                         * SUBSCRIBED
-                         *
-                         * => READY
-                         */
-
                         _connection.MarkReady();
 
-                        /*
-                         * Sau khi Subscriber READY,
-                         * yêu cầu Publisher gửi MePDV.
-                         */
                         _publishManager.Request(MqttTopics.MePDV);
                     }
                     catch (OperationCanceledException)
@@ -105,27 +89,6 @@ public sealed class MqttSubscriber
                             "MQTT subscribe failed | Server={Server}",
                             _connection.CurrentServerName
                         );
-
-                        /*
-                         * Không tự switch server ở đây.
-                         *
-                         * Subscriber chỉ thông báo:
-                         *
-                         * "Connection hiện tại không thể READY."
-                         *
-                         * ConnectionManager sẽ:
-                         *
-                         * RequestReconnect
-                         *       ↓
-                         * Disconnect
-                         *       ↓
-                         * Connect lại
-                         *       ↓
-                         * Subscriber subscribe lại
-                         *
-                         * Việc switch Main / Backup do
-                         * ConnectionManager quyết định.
-                         */
                         _connection.RequestReconnect();
                     }
 
@@ -136,18 +99,6 @@ public sealed class MqttSubscriber
                 // 3. ĐÃ READY
                 // -------------------------------------------------
 
-                /*
-                 * Nếu đã READY thì Subscriber không cần
-                 * polling hoặc Task.Delay().
-                 *
-                 * Chờ cho tới khi READY bị mất hoặc
-                 * cancellation xảy ra.
-                 *
-                 * WaitUntilReadyAsync() sẽ return ngay vì
-                 * hiện tại đã READY, do đó không dùng nó
-                 * để chờ mất READY.
-                 */
-
                 await WaitUntilConnectionLostAsync(cancellationToken);
             }
         }
@@ -157,9 +108,6 @@ public sealed class MqttSubscriber
         }
         finally
         {
-            /*
-             * Bỏ callback khi Subscriber kết thúc.
-             */
             _mqtt.MessageReceived -= OnMessageReceivedAsync;
 
             _connection.MarkNotReady();
@@ -174,18 +122,6 @@ public sealed class MqttSubscriber
 
     private async Task WaitUntilConnectionLostAsync(CancellationToken cancellationToken)
     {
-        /*
-         * Không cần tạo thêm TaskCompletionSource ở Subscriber.
-         *
-         * ConnectionManager là nơi sở hữu connection state.
-         *
-         * Subscriber chỉ kiểm tra connection theo chu kỳ nhỏ.
-         *
-         * Tuy nhiên đây không phải connection retry.
-         * Đây chỉ là vòng quay để quay lại WaitUntilConnectedAsync
-         * khi MQTT bị mất.
-         */
-
         while (_mqtt.IsConnected && _connection.IsReady)
         {
             await Task.Delay(100, cancellationToken);

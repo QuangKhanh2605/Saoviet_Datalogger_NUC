@@ -5,11 +5,11 @@ namespace Mqtt.Mqtt.Core;
 
 public sealed class MqttTopicBuilder
 {
-    private readonly AppSettings _settings;
+    private readonly IOptionsMonitor<AppSettings> _settings;
 
-    public MqttTopicBuilder(IOptions<AppSettings> options)
+    public MqttTopicBuilder(IOptionsMonitor<AppSettings> options)
     {
-        _settings = options.Value;
+        _settings = options;
     }
 
     public string Build(string logicalTopic)
@@ -22,40 +22,45 @@ public sealed class MqttTopicBuilder
             );
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.Mqtt.Topic))
+        // Luôn đọc cấu hình mới nhất.
+        AppSettings settings = _settings.CurrentValue;
+
+        if (string.IsNullOrWhiteSpace(settings.Mqtt.Topic))
         {
             throw new InvalidOperationException("Mqtt.Topic is not configured.");
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.Device.Id))
+        if (string.IsNullOrWhiteSpace(settings.Device.Id))
         {
             throw new InvalidOperationException("Device.Id is not configured.");
         }
 
-        string prefix = _settings.Mqtt.Topic.Trim('/');
-
+        string prefix = settings.Mqtt.Topic.Trim('/');
         string topic = logicalTopic.Trim('/');
+        string deviceId = settings.Device.Id.Trim('/');
 
-        string deviceId = _settings.Device.Id.Trim('/');
+        string result = $"{prefix}/{topic}/{deviceId}";
 
-        return $"{prefix}/{topic}/{deviceId}";
+        return result;
     }
 
     public string BuildSubscribeTopic()
     {
-        if (string.IsNullOrWhiteSpace(_settings.Mqtt.Sub))
+        // Luôn đọc cấu hình mới nhất.
+        AppSettings settings = _settings.CurrentValue;
+
+        if (string.IsNullOrWhiteSpace(settings.Mqtt.Sub))
         {
             throw new InvalidOperationException("Mqtt.Sub is not configured.");
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.Device.Id))
+        if (string.IsNullOrWhiteSpace(settings.Device.Id))
         {
             throw new InvalidOperationException("Device.Id is not configured.");
         }
 
-        string prefix = _settings.Mqtt.Sub.Trim('/');
-
-        string deviceId = _settings.Device.Id.Trim('/');
+        string prefix = settings.Mqtt.Sub.Trim('/');
+        string deviceId = settings.Device.Id.Trim('/');
 
         return $"{prefix}/{deviceId}/#";
     }

@@ -15,7 +15,7 @@ public sealed class MqttService
 
     public event Func<string, string, Task>? MessageReceived;
 
-    public event Action? Disconnected;
+    public event Action<MqttClientDisconnectedEventArgs>? Disconnected;
 
     public bool IsConnected => _client.IsConnected;
 
@@ -29,7 +29,6 @@ public sealed class MqttService
         _client = factory.CreateMqttClient();
 
         _client.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
-
         _client.DisconnectedAsync += OnDisconnectedAsync;
     }
 
@@ -54,7 +53,6 @@ public sealed class MqttService
         MqttClientOptions options = new MqttClientOptionsBuilder()
             .WithClientId(_settings.Device.Id)
             .WithTcpServer(server.IP, server.Port)
-            // MQTT 3.1
             .WithProtocolVersion(MqttProtocolVersion.V310)
             .WithCredentials(server.User, server.Pass)
             .WithKeepAlivePeriod(TimeSpan.FromSeconds(Math.Max(1, _settings.Mqtt.KeepAliveSeconds)))
@@ -144,7 +142,6 @@ public sealed class MqttService
         try
         {
             string topic = args.ApplicationMessage.Topic;
-
             string payload = args.ApplicationMessage.ConvertPayloadToString();
 
             Func<string, string, Task>? handler = MessageReceived;
@@ -168,11 +165,19 @@ public sealed class MqttService
     {
         try
         {
-            Disconnected?.Invoke();
+            _logger.LogWarning(
+                "MQTT client disconnected | ClientWasConnected={ClientWasConnected} | Reason={Reason} | ReasonString={ReasonString} | Exception={Exception}",
+                args.ClientWasConnected,
+                args.Reason,
+                args.ReasonString,
+                args.Exception?.ToString() ?? "None"
+            );
+
+            Disconnected?.Invoke(args);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "MQTT disconnected event failed.");
+            _logger.LogError(ex, "MQTT disconnected event handler failed.");
         }
 
         return Task.CompletedTask;
@@ -187,9 +192,7 @@ public sealed class MqttService
         return qos switch
         {
             0 => MqttQualityOfServiceLevel.AtMostOnce,
-
             1 => MqttQualityOfServiceLevel.AtLeastOnce,
-
             2 => MqttQualityOfServiceLevel.ExactlyOnce,
 
             _ => throw new ArgumentOutOfRangeException(

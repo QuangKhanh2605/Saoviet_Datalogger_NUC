@@ -35,6 +35,18 @@
                 "Path": "khanh_ftp/SVWMDL24009999",
                 "PackageMode": 2,
                 "ModePath": 1
+            },
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT003",
+                "KYHIEU_TRAM": "TRAM003",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL24009999",
+                "PackageMode": 2,
+                "ModePath": 2
             }
         ]
     },
@@ -57,6 +69,18 @@
                 "MA_TINH": "HN",
                 "KYHIEU_CONGTRINH": "CT002",
                 "KYHIEU_TRAM": "TRAM002",
+                "IP": "124.158.5.154",
+                "Port": 21,
+                "User": "admin",
+                "Pass": "admin",
+                "Path": "khanh_ftp/SVWMDL25009999",
+                "PackageMode": 2,
+                "ModePath": 1
+            },
+            {
+                "MA_TINH": "HN",
+                "KYHIEU_CONGTRINH": "CT003",
+                "KYHIEU_TRAM": "TRAM003",
                 "IP": "124.158.5.154",
                 "Port": 21,
                 "User": "admin",

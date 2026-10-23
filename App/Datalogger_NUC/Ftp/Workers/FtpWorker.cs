@@ -1,21 +1,69 @@
 using System.Text;
+using System.Text.Json;
 using Ftp.Configuration;
 using Ftp.Models;
 using Ftp.Services;
 using Microsoft.Extensions.Options;
+using StackExchange.Redis;
 
 namespace Ftp.Workers;
 
 public sealed class FtpWorker : BackgroundService
 {
     private const int MaxMessagesPerFile = 50;
+    private const int RedisReadBatchSize = 1000;
+    private const int LoopDelaySeconds = 1;
+    private const int ConfigurationRetryDelaySeconds = 5;
+
+    private const string Ftp1Stream = "database:stream:ftp";
+    private const string Ftp2Stream = "database:stream:ftp2";
+
+    private const string Ftp1StatusPrefix = "database:status:ftp:";
+    private const string Ftp2StatusPrefix = "database:status:ftp2:";
+
+    private const string Ftp1DedupPrefix = "database:dedup:ftp:";
+    private const string Ftp2DedupPrefix = "database:dedup:ftp2:";
+
+    private const string PayloadField = "payload";
+
+    private const string MarkSentScript = """
+        local stream = KEYS[1]
+        local statusPrefix = ARGV[1]
+        local dedupPrefix = ARGV[2]
+        local processed = 0
+
+        for i = 3, #ARGV, 2 do
+            local messageId = ARGV[i]
+            local entryId = ARGV[i + 1]
+
+            redis.call('SET', statusPrefix .. messageId, '1')
+            redis.call('XDEL', stream, entryId)
+            redis.call('DEL', dedupPrefix .. messageId)
+
+            processed = processed + 1
+        end
+
+        return processed
+        """;
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
 
     private readonly ILogger<FtpWorker> _logger;
-    private readonly DatabaseApiService _databaseApi;
     private readonly FtpService _ftpService;
+    private readonly IOptionsMonitor<AppSettings> _options;
+    private readonly IDatabase _redis;
 
-    private readonly FtpSettings _ftpSettings;
-    private readonly FtpSettings _ftp2Settings;
+    private readonly SemaphoreSlim _restartSignal = new(0, 1);
+
+    // Lưu ánh xạ MessageId -> Redis Stream EntryId để xóa đúng entry
+    // sau khi FTP upload thành công.
+    private readonly Dictionary<
+        (FtpQueueType QueueType, long MessageId),
+        RedisValue
+    > _streamEntryIds = new();
 
     private volatile bool _workerRunning;
 
@@ -25,96 +73,161 @@ public sealed class FtpWorker : BackgroundService
 
     public FtpWorker(
         ILogger<FtpWorker> logger,
-        DatabaseApiService databaseApi,
         FtpService ftpService,
-        IOptions<AppSettings> options
+        IOptionsMonitor<AppSettings> options,
+        IConnectionMultiplexer redis
     )
     {
         _logger = logger;
-        _databaseApi = databaseApi;
         _ftpService = ftpService;
-
-        _ftpSettings = options.Value.Ftp;
-        _ftp2Settings = options.Value.Ftp2;
+        _options = options;
+        _redis = redis.GetDatabase();
     }
+
+    private sealed record FtpTarget(string Name, FtpSettings Settings, FtpQueueType QueueType);
+
+    private enum FtpQueueType
+    {
+        Ftp1,
+        Ftp2,
+    }
+
+    // ================================================================
+    // REQUEST RESTART
+    // ================================================================
+
+    public void RequestRestart()
+    {
+        try
+        {
+            _restartSignal.Release();
+            _logger.LogInformation("FTP session restart requested.");
+        }
+        catch (SemaphoreFullException)
+        {
+            // Đã có yêu cầu restart đang chờ xử lý.
+        }
+        catch (ObjectDisposedException)
+        {
+            _logger.LogDebug("FTP restart signal đã được giải phóng.");
+        }
+    }
+
+    // ================================================================
+    // WAIT FOR RESTART REQUEST
+    // ================================================================
+
+    private async Task WaitForRestartAsync(CancellationToken cancellationToken)
+    {
+        await _restartSignal.WaitAsync(cancellationToken);
+
+        while (_restartSignal.Wait(0))
+        {
+            // Gộp nhiều yêu cầu restart thành một lần.
+        }
+    }
+
+    // ================================================================
+    // CREATE FTP TARGETS
+    // ================================================================
+
+    private List<FtpTarget> CreateFtpTargets()
+    {
+        AppSettings settings = _options.CurrentValue;
+
+        return new List<FtpTarget>
+        {
+            new("FTP1", settings.Ftp, FtpQueueType.Ftp1),
+            new("FTP2", settings.Ftp2, FtpQueueType.Ftp2),
+        };
+    }
+
+    // ================================================================
+    // WORKER LIFECYCLE
+    // ================================================================
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("FTP Worker started.");
-
         _workerRunning = true;
-
-        if (!_ftpSettings.Enabled && !_ftp2Settings.Enabled)
-        {
-            _logger.LogInformation("FTP1 and FTP2 are both disabled.");
-
-            _workerRunning = false;
-
-            return;
-        }
-
-        if (_ftpSettings.Enabled)
-        {
-            if (_ftpSettings.Servers.Count == 0)
-            {
-                _logger.LogWarning("FTP1 enabled nhưng không có server.");
-            }
-            else
-            {
-                ValidateServers(_ftpSettings, "FTP1");
-            }
-        }
-
-        if (_ftp2Settings.Enabled)
-        {
-            if (_ftp2Settings.Servers.Count == 0)
-            {
-                _logger.LogWarning("FTP2 enabled nhưng không có server.");
-            }
-            else
-            {
-                ValidateServers(_ftp2Settings, "FTP2");
-            }
-        }
 
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                bool processedAnyData = false;
+                using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    stoppingToken
+                );
 
-                if (_ftpSettings.Enabled && _ftpSettings.Servers.Count > 0)
+                using var restartCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    stoppingToken
+                );
+
+                Task sessionTask = RunSessionAsync(sessionCts.Token);
+                Task restartTask = WaitForRestartAsync(restartCts.Token);
+
+                Task completed = await Task.WhenAny(sessionTask, restartTask);
+
+                await restartCts.CancelAsync();
+
+                try
                 {
-                    foreach (FtpServerSettings server in _ftpSettings.Servers)
+                    await restartTask;
+                }
+                catch (OperationCanceledException) when (restartCts.IsCancellationRequested)
+                {
+                    // Bình thường khi phiên kết thúc hoặc ứng dụng shutdown.
+                }
+
+                if (stoppingToken.IsCancellationRequested)
+                {
+                    await sessionCts.CancelAsync();
+                }
+                else if (completed == restartTask)
+                {
+                    _logger.LogInformation("Restarting FTP session to reload configuration.");
+
+                    await sessionCts.CancelAsync();
+                }
+                else
+                {
+                    await sessionCts.CancelAsync();
+                }
+
+                try
+                {
+                    await sessionTask;
+                }
+                catch (OperationCanceledException) when (sessionCts.IsCancellationRequested)
+                {
+                    // Bình thường khi restart hoặc shutdown.
+                }
+                catch (Exception ex)
+                {
+                    SaveError(ex);
+
+                    _logger.LogError(ex, "FTP session ended unexpectedly. Worker will retry.");
+                }
+
+                if (stoppingToken.IsCancellationRequested)
+                    break;
+
+                if (completed == sessionTask)
+                {
+                    try
                     {
-                        if (stoppingToken.IsCancellationRequested)
-                            break;
-
-                        bool processed = await ProcessServerAsync(server, false, stoppingToken);
-
-                        if (processed)
-                            processedAnyData = true;
+                        await Task.Delay(
+                            TimeSpan.FromSeconds(ConfigurationRetryDelaySeconds),
+                            stoppingToken
+                        );
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
                     }
                 }
 
-                if (_ftp2Settings.Enabled && _ftp2Settings.Servers.Count > 0)
-                {
-                    foreach (FtpServerSettings server in _ftp2Settings.Servers)
-                    {
-                        if (stoppingToken.IsCancellationRequested)
-                            break;
-
-                        bool processed = await ProcessServerAsync(server, true, stoppingToken);
-
-                        if (processed)
-                            processedAnyData = true;
-                    }
-                }
-
-                if (processedAnyData)
-                    continue;
-
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                _logger.LogInformation("Starting FTP session with current configuration.");
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -123,146 +236,230 @@ public sealed class FtpWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _lastErrorTime = DateTime.Now;
-            _lastError = ex.Message;
+            SaveError(ex);
 
-            _logger.LogError(ex, "FTP Worker stopped unexpectedly.");
+            _logger.LogCritical(ex, "FTP Worker encountered an unexpected fatal error.");
         }
-
-        _workerRunning = false;
-
-        _logger.LogInformation("FTP Worker stopped.");
+        finally
+        {
+            _workerRunning = false;
+            _logger.LogInformation("FTP Worker stopped.");
+        }
     }
 
-    private async Task<bool> ProcessServerAsync(
+    // ================================================================
+    // RUN ONE FTP SESSION
+    // ================================================================
+
+    private async Task RunSessionAsync(CancellationToken sessionToken)
+    {
+        List<FtpTarget> ftpTargets = CreateFtpTargets();
+
+        ValidateFtpTargets(ftpTargets);
+
+        _logger.LogInformation(
+            "FTP session started. FTP1 enabled={Ftp1Enabled}, FTP2 enabled={Ftp2Enabled}.",
+            ftpTargets[0].Settings.Enabled,
+            ftpTargets[1].Settings.Enabled
+        );
+
+        while (!sessionToken.IsCancellationRequested)
+        {
+            // Giữ thứ tự FTP1 -> FTP2.
+            foreach (FtpTarget target in ftpTargets)
+            {
+                sessionToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    await ProcessServersAsync(target, sessionToken);
+                }
+                catch (OperationCanceledException) when (sessionToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    SaveError(ex);
+
+                    _logger.LogError(
+                        ex,
+                        "{FtpType} processing failed unexpectedly. Will retry next loop.",
+                        target.Name
+                    );
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(LoopDelaySeconds), sessionToken);
+        }
+    }
+
+    // ================================================================
+    // PROCESS SERVERS
+    // ================================================================
+
+    private async Task ProcessServersAsync(FtpTarget target, CancellationToken stoppingToken)
+    {
+        FtpSettings settings = target.Settings;
+
+        if (!settings.Enabled || settings.Servers.Count == 0)
+            return;
+
+        foreach (FtpServerSettings server in settings.Servers)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                await ProcessServerAsync(target, server, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                SaveError(ex);
+
+                _logger.LogError(
+                    ex,
+                    "{FtpType} error. Station={Station}. Retry next loop.",
+                    target.Name,
+                    server.KYHIEU_TRAM
+                );
+            }
+        }
+    }
+
+    // ================================================================
+    // PROCESS SERVER
+    // ================================================================
+
+    private async Task ProcessServerAsync(
+        FtpTarget target,
         FtpServerSettings server,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
-        return server.PackageMode switch
+        switch (server.PackageMode)
         {
-            1 => await ProcessMode1Async(server, ftp2, stoppingToken),
+            case 1:
+                await ProcessMode1Async(target, server, stoppingToken);
+                break;
 
-            2 => await ProcessMode2Async(server, ftp2, stoppingToken),
+            case 2:
+                await ProcessMode2Async(target, server, stoppingToken);
+                break;
 
-            3 => await ProcessMode3Async(server, ftp2, stoppingToken),
+            case 3:
+                await ProcessMode3Async(target, server, stoppingToken);
+                break;
 
-            _ => throw new ArgumentOutOfRangeException(
-                nameof(server.PackageMode),
-                server.PackageMode,
-                "PackageMode phải là 1, 2 hoặc 3."
-            ),
-        };
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(server.PackageMode),
+                    server.PackageMode,
+                    "PackageMode phải là 1, 2 hoặc 3."
+                );
+        }
     }
 
-    private async Task<bool> ProcessMode1Async(
+    // ================================================================
+    // MODE 1
+    // ================================================================
+
+    private async Task ProcessMode1Async(
+        FtpTarget target,
         FtpServerSettings server,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
         List<StationMessage> messages = await GetPendingFtpMessagesAsync(
+            target,
             server.KYHIEU_TRAM,
-            ftp2,
             stoppingToken
         );
 
         if (messages.Count == 0)
-            return false;
-
-        bool processedAny = false;
+            return;
 
         foreach (StationMessage message in messages)
         {
-            if (stoppingToken.IsCancellationRequested)
-                break;
-
-            bool allUploaded = true;
+            stoppingToken.ThrowIfCancellationRequested();
 
             foreach (SensorReading reading in message.Measurements)
             {
+                stoppingToken.ThrowIfCancellationRequested();
+
                 DateTime packageTimestamp = DateTime.Now;
 
                 string fileName = BuildMode1FileName(server, reading.Name, packageTimestamp);
 
                 string content = BuildMode1Content(message, reading);
 
-                byte[] data = Encoding.UTF8.GetBytes(content);
-
                 bool success = await _ftpService.UploadBytesAsync(
                     server,
                     fileName,
-                    data,
+                    Encoding.UTF8.GetBytes(content),
                     packageTimestamp,
                     stoppingToken
                 );
 
                 if (!success)
                 {
-                    allUploaded = false;
-
                     _logger.LogWarning(
-                        "{FtpType} Mode 1 upload thất bại. "
-                            + "MessageId={MessageId}, "
-                            + "Station={Station}, "
-                            + "Parameter={Parameter}",
-                        GetFtpTypeName(ftp2),
+                        "{FtpType} Mode 1 upload failed. MessageId={MessageId}, Station={Station}, Parameter={Parameter}. Retry next loop.",
+                        target.Name,
                         message.Id,
                         message.StationName,
                         reading.Name
                     );
 
-                    break;
+                    return;
                 }
             }
 
-            if (allUploaded)
-            {
-                await MarkFtpSentAsync(new[] { message.Id }, ftp2, stoppingToken);
+            await MarkFtpSentAsync(target, new[] { message.Id }, stoppingToken);
 
-                _lastSuccessfulProcess = DateTime.Now;
+            _lastSuccessfulProcess = DateTime.Now;
 
-                processedAny = true;
-
-                _logger.LogInformation(
-                    "{FtpType} Mode 1 hoàn thành. MessageId={MessageId}",
-                    GetFtpTypeName(ftp2),
-                    message.Id
-                );
-            }
+            _logger.LogInformation(
+                "{FtpType} Mode 1 OK. MessageId={MessageId}, Station={Station}",
+                target.Name,
+                message.Id,
+                message.StationName
+            );
         }
-
-        return processedAny;
     }
 
-    private async Task<bool> ProcessMode2Async(
+    // ================================================================
+    // MODE 2
+    // ================================================================
+
+    private async Task ProcessMode2Async(
+        FtpTarget target,
         FtpServerSettings server,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
         List<StationMessage> messages = await GetPendingFtpMessagesAsync(
+            target,
             server.KYHIEU_TRAM,
-            ftp2,
             stoppingToken
         );
 
         if (messages.Count == 0)
-            return false;
+            return;
 
         DateTime packageTimestamp = DateTime.Now;
 
         string fileName = BuildMode2FileName(server, packageTimestamp);
-
         string content = BuildMode2Content(messages);
-
-        byte[] data = Encoding.UTF8.GetBytes(content);
 
         bool success = await _ftpService.UploadBytesAsync(
             server,
             fileName,
-            data,
+            Encoding.UTF8.GetBytes(content),
             packageTimestamp,
             stoppingToken
         );
@@ -270,36 +467,38 @@ public sealed class FtpWorker : BackgroundService
         if (!success)
         {
             _logger.LogWarning(
-                "{FtpType} Mode 2 upload thất bại. " + "Station={Station}, Messages={Count}",
-                GetFtpTypeName(ftp2),
+                "{FtpType} Mode 2 upload failed. Station={Station}, Messages={Count}. Retry next loop.",
+                target.Name,
                 server.KYHIEU_TRAM,
                 messages.Count
             );
 
-            return false;
+            return;
         }
 
-        await MarkFtpSentAsync(messages.Select(x => x.Id), ftp2, stoppingToken);
+        await MarkFtpSentAsync(target, messages.Select(x => x.Id), stoppingToken);
 
         _lastSuccessfulProcess = DateTime.Now;
 
         _logger.LogInformation(
-            "{FtpType} Mode 2 hoàn thành. " + "Station={Station}, Messages={Count}",
-            GetFtpTypeName(ftp2),
+            "{FtpType} Mode 2 OK. Station={Station}, Messages={Count}",
+            target.Name,
             server.KYHIEU_TRAM,
             messages.Count
         );
-
-        return true;
     }
 
-    private async Task<bool> ProcessMode3Async(
+    // ================================================================
+    // MODE 3
+    // ================================================================
+
+    private async Task ProcessMode3Async(
+        FtpTarget target,
         FtpServerSettings server,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
-        FtpSettings settings = ftp2 ? _ftp2Settings : _ftpSettings;
+        FtpSettings settings = target.Settings;
 
         List<string> stationNames = settings
             .Servers.Where(x =>
@@ -316,29 +515,26 @@ public sealed class FtpWorker : BackgroundService
             .ToList();
 
         if (stationNames.Count == 0)
-            return false;
+            return;
 
         List<StationMessage> messages = await GetPendingFtpMessagesAsync(
+            target,
             stationNames,
-            ftp2,
             stoppingToken
         );
 
         if (messages.Count == 0)
-            return false;
+            return;
 
         DateTime packageTimestamp = DateTime.Now;
 
         string fileName = BuildMode3FileName(server, packageTimestamp);
-
         string content = BuildMode3Content(messages);
-
-        byte[] data = Encoding.UTF8.GetBytes(content);
 
         bool success = await _ftpService.UploadBytesAsync(
             server,
             fileName,
-            data,
+            Encoding.UTF8.GetBytes(content),
             packageTimestamp,
             stoppingToken
         );
@@ -346,112 +542,299 @@ public sealed class FtpWorker : BackgroundService
         if (!success)
         {
             _logger.LogWarning(
-                "{FtpType} Mode 3 upload thất bại. " + "CongTrinh={CongTrinh}, Messages={Count}",
-                GetFtpTypeName(ftp2),
+                "{FtpType} Mode 3 upload failed. CongTrinh={CongTrinh}, Messages={Count}. Retry next loop.",
+                target.Name,
                 server.KYHIEU_CONGTRINH,
                 messages.Count
             );
 
-            return false;
+            return;
         }
 
-        await MarkFtpSentAsync(messages.Select(x => x.Id), ftp2, stoppingToken);
+        await MarkFtpSentAsync(target, messages.Select(x => x.Id), stoppingToken);
 
         _lastSuccessfulProcess = DateTime.Now;
 
         _logger.LogInformation(
-            "{FtpType} Mode 3 hoàn thành. " + "CongTrinh={CongTrinh}, Messages={Count}",
-            GetFtpTypeName(ftp2),
+            "{FtpType} Mode 3 OK. CongTrinh={CongTrinh}, Messages={Count}",
+            target.Name,
             server.KYHIEU_CONGTRINH,
             messages.Count
         );
-
-        return true;
     }
 
-    private async Task<List<StationMessage>> GetPendingFtpMessagesAsync(
+    // ================================================================
+    // REDIS - GET PENDING MESSAGES
+    // ================================================================
+
+    private Task<List<StationMessage>> GetPendingFtpMessagesAsync(
+        FtpTarget target,
         string stationName,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
-        return await GetPendingFtpMessagesAsync(new[] { stationName }, ftp2, stoppingToken);
+        return GetPendingFtpMessagesAsync(target, new[] { stationName }, stoppingToken);
     }
 
     private async Task<List<StationMessage>> GetPendingFtpMessagesAsync(
+        FtpTarget target,
         IEnumerable<string> stationNames,
-        bool ftp2,
         CancellationToken stoppingToken
     )
     {
-        if (ftp2)
+        stoppingToken.ThrowIfCancellationRequested();
+
+        RedisKey stream = GetStreamKey(target.QueueType);
+
+        HashSet<string> stationFilter = stationNames
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (stationFilter.Count == 0)
+            return new List<StationMessage>();
+
+        StreamEntry[] entries = await _redis.StreamRangeAsync(
+            stream,
+            minId: "-",
+            maxId: "+",
+            count: RedisReadBatchSize,
+            messageOrder: Order.Ascending
+        );
+
+        var messages = new List<StationMessage>(MaxMessagesPerFile);
+        var seenMessageIds = new HashSet<long>();
+
+        foreach (StreamEntry entry in entries)
         {
-            return await _databaseApi.GetPendingFtp2MessagesAsync(
-                stationNames,
-                MaxMessagesPerFile,
-                stoppingToken
+            stoppingToken.ThrowIfCancellationRequested();
+
+            RedisValue payload = RedisValue.Null;
+
+            foreach (NameValueEntry field in entry.Values)
+            {
+                if (field.Name == PayloadField)
+                {
+                    payload = field.Value;
+                    break;
+                }
+            }
+
+            if (payload.IsNullOrEmpty)
+            {
+                _logger.LogWarning(
+                    "Redis entry has no payload. Stream={Stream}, EntryId={EntryId}. Entry retained.",
+                    stream,
+                    entry.Id
+                );
+
+                continue;
+            }
+
+            StationMessage? message;
+
+            try
+            {
+                message = JsonSerializer.Deserialize<StationMessage>(
+                    payload.ToString(),
+                    JsonOptions
+                );
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Cannot deserialize Redis payload. Stream={Stream}, EntryId={EntryId}. Entry retained.",
+                    stream,
+                    entry.Id
+                );
+
+                continue;
+            }
+
+            if (message is null || message.Id <= 0)
+            {
+                _logger.LogWarning(
+                    "Invalid station message in Redis. Stream={Stream}, EntryId={EntryId}. Entry retained.",
+                    stream,
+                    entry.Id
+                );
+
+                continue;
+            }
+
+            if (
+                string.IsNullOrWhiteSpace(message.StationName)
+                || !stationFilter.Contains(message.StationName)
+            )
+            {
+                continue;
+            }
+
+            if (!seenMessageIds.Add(message.Id))
+                continue;
+
+            _streamEntryIds[(target.QueueType, message.Id)] = entry.Id;
+
+            messages.Add(message);
+
+            if (messages.Count >= MaxMessagesPerFile)
+                break;
+        }
+
+        return messages;
+    }
+
+    // ================================================================
+    // REDIS - MARK SENT
+    // ================================================================
+
+    private async Task MarkFtpSentAsync(
+        FtpTarget target,
+        IEnumerable<long> messageIds,
+        CancellationToken stoppingToken
+    )
+    {
+        stoppingToken.ThrowIfCancellationRequested();
+
+        RedisKey stream = GetStreamKey(target.QueueType);
+        string statusPrefix = GetStatusPrefix(target.QueueType);
+        string dedupPrefix = GetDedupPrefix(target.QueueType);
+
+        long[] distinctIds = messageIds.Where(id => id > 0).Distinct().ToArray();
+
+        if (distinctIds.Length == 0)
+            return;
+
+        var references = new List<(long MessageId, RedisValue EntryId)>();
+
+        foreach (long messageId in distinctIds)
+        {
+            if (_streamEntryIds.TryGetValue((target.QueueType, messageId), out RedisValue entryId))
+            {
+                references.Add((messageId, entryId));
+            }
+            else
+            {
+                // Không đánh dấu thành công nếu không xác định được entry.
+                // Giữ nguyên dữ liệu để tránh xóa nhầm bản tin.
+                throw new InvalidOperationException(
+                    $"Không tìm thấy Redis Stream EntryId cho "
+                        + $"{target.Name}, MessageId={messageId}. "
+                        + "Không thể xác nhận bản tin đã gửi."
+                );
+            }
+        }
+
+        var arguments = new RedisValue[2 + references.Count * 2];
+
+        arguments[0] = statusPrefix;
+        arguments[1] = dedupPrefix;
+
+        int argumentIndex = 2;
+
+        foreach (var reference in references)
+        {
+            arguments[argumentIndex++] = reference.MessageId.ToString();
+            arguments[argumentIndex++] = reference.EntryId;
+        }
+
+        RedisResult result = await _redis.ScriptEvaluateAsync(
+            MarkSentScript,
+            new RedisKey[] { stream },
+            arguments
+        );
+
+        long processed = (long)result;
+
+        if (processed != references.Count)
+        {
+            throw new InvalidOperationException(
+                $"Redis mark-sent không xử lý đủ bản tin. "
+                    + $"Expected={references.Count}, Actual={processed}."
             );
         }
 
-        return await _databaseApi.GetPendingFtpMessagesAsync(
-            stationNames,
-            MaxMessagesPerFile,
-            stoppingToken
+        foreach (var reference in references)
+        {
+            _streamEntryIds.Remove((target.QueueType, reference.MessageId));
+        }
+
+        _logger.LogInformation(
+            "{FtpType} marked {Count} messages as sent in Redis.",
+            target.Name,
+            processed
         );
     }
 
-    private async Task MarkFtpSentAsync(
-        IEnumerable<long> messageIds,
-        bool ftp2,
-        CancellationToken stoppingToken
-    )
+    // ================================================================
+    // REDIS - QUEUE KEYS
+    // ================================================================
+
+    private static RedisKey GetStreamKey(FtpQueueType queueType)
     {
-        if (ftp2)
+        return queueType switch
         {
-            await _databaseApi.MarkFtp2SentAsync(messageIds, stoppingToken);
-
-            return;
-        }
-
-        await _databaseApi.MarkFtpSentAsync(messageIds, stoppingToken);
+            FtpQueueType.Ftp1 => Ftp1Stream,
+            FtpQueueType.Ftp2 => Ftp2Stream,
+            _ => throw new ArgumentOutOfRangeException(nameof(queueType)),
+        };
     }
 
-    private static string GetFtpTypeName(bool ftp2)
+    private static string GetStatusPrefix(FtpQueueType queueType)
     {
-        return ftp2 ? "FTP2" : "FTP1";
+        return queueType switch
+        {
+            FtpQueueType.Ftp1 => Ftp1StatusPrefix,
+            FtpQueueType.Ftp2 => Ftp2StatusPrefix,
+            _ => throw new ArgumentOutOfRangeException(nameof(queueType)),
+        };
     }
+
+    private static string GetDedupPrefix(FtpQueueType queueType)
+    {
+        return queueType switch
+        {
+            FtpQueueType.Ftp1 => Ftp1DedupPrefix,
+            FtpQueueType.Ftp2 => Ftp2DedupPrefix,
+            _ => throw new ArgumentOutOfRangeException(nameof(queueType)),
+        };
+    }
+
+    // ================================================================
+    // FILE NAME
+    // ================================================================
 
     private static string BuildMode1FileName(
         FtpServerSettings server,
-        string Name,
-        DateTime packageTimestamp
+        string name,
+        DateTime timestamp
     )
     {
-        string sendTime = packageTimestamp.ToString("yyyyMMddHHmmss");
-
         return $"{server.MA_TINH}_"
             + $"{server.KYHIEU_CONGTRINH}_"
             + $"{server.KYHIEU_TRAM}_"
-            + $"{Name}_"
-            + $"{sendTime}.txt";
+            + $"{name}_"
+            + $"{timestamp:yyyyMMddHHmmss}.txt";
     }
 
-    private static string BuildMode2FileName(FtpServerSettings server, DateTime packageTimestamp)
+    private static string BuildMode2FileName(FtpServerSettings server, DateTime timestamp)
     {
-        string sendTime = packageTimestamp.ToString("yyyyMMddHHmmss");
-
         return $"{server.MA_TINH}_"
             + $"{server.KYHIEU_CONGTRINH}_"
             + $"{server.KYHIEU_TRAM}_"
-            + $"{sendTime}.txt";
+            + $"{timestamp:yyyyMMddHHmmss}.txt";
     }
 
-    private static string BuildMode3FileName(FtpServerSettings server, DateTime packageTimestamp)
+    private static string BuildMode3FileName(FtpServerSettings server, DateTime timestamp)
     {
-        string sendTime = packageTimestamp.ToString("yyyyMMddHHmmss");
-
-        return $"{server.MA_TINH}_" + $"{server.KYHIEU_CONGTRINH}_" + $"{sendTime}.txt";
+        return $"{server.MA_TINH}_"
+            + $"{server.KYHIEU_CONGTRINH}_"
+            + $"{timestamp:yyyyMMddHHmmss}.txt";
     }
+
+    // ================================================================
+    // CONTENT
+    // ================================================================
 
     private static string BuildMode1Content(StationMessage message, SensorReading reading)
     {
@@ -505,8 +888,33 @@ public sealed class FtpWorker : BackgroundService
         return builder.ToString();
     }
 
-    private void ValidateServers(FtpSettings settings, string ftpType)
+    // ================================================================
+    // CONFIGURATION VALIDATION
+    // ================================================================
+
+    private static void ValidateFtpTargets(List<FtpTarget> ftpTargets)
     {
+        foreach (FtpTarget target in ftpTargets)
+        {
+            if (target.Settings is null)
+            {
+                throw new ArgumentException($"{target.Name} configuration không được null.");
+            }
+
+            ValidateFtpSettings(target.Settings, target.Name);
+        }
+    }
+
+    private static void ValidateFtpSettings(FtpSettings settings, string ftpType)
+    {
+        if (!settings.Enabled)
+            return;
+
+        if (settings.Servers is null || settings.Servers.Count == 0)
+        {
+            throw new ArgumentException($"{ftpType} enabled nhưng không có server.");
+        }
+
         foreach (FtpServerSettings server in settings.Servers)
         {
             if (string.IsNullOrWhiteSpace(server.MA_TINH))
@@ -558,51 +966,55 @@ public sealed class FtpWorker : BackgroundService
         }
     }
 
-    // ============================================================
-    // HEALTH
-    // ============================================================
+    // ================================================================
+    // STATUS
+    // ================================================================
+
+    private void SaveError(Exception ex)
+    {
+        _lastErrorTime = DateTime.Now;
+        _lastError = ex.Message;
+    }
 
     public object GetHealthStatus()
     {
-        if (!_workerRunning)
-        {
-            return new
-            {
-                status = "Unhealthy",
-                service = "FTP",
-                worker = "Stopped",
-            };
-        }
-
         return new
         {
-            status = "Healthy",
+            status = _workerRunning ? "Healthy" : "Unhealthy",
             service = "FTP",
-            worker = "Running",
+            worker = _workerRunning ? "Running" : "Stopped",
         };
     }
 
-    // ============================================================
-    // STATUS
-    // ============================================================
-
     public object GetStatus()
     {
+        List<FtpTarget> ftpTargets = CreateFtpTargets();
+
         return new
         {
             service = "FTP",
-
             worker = _workerRunning ? "Running" : "Stopped",
 
-            ftp1 = new { enabled = _ftpSettings.Enabled, servers = _ftpSettings.Servers.Count },
-
-            ftp2 = new { enabled = _ftp2Settings.Enabled, servers = _ftp2Settings.Servers.Count },
+            ftp = ftpTargets.Select(x => new
+            {
+                name = x.Name,
+                enabled = x.Settings.Enabled,
+                servers = x.Settings.Servers?.Count ?? 0,
+            }),
 
             lastSuccessfulProcess = _lastSuccessfulProcess,
-
             lastErrorTime = _lastErrorTime,
-
             lastError = _lastError,
         };
+    }
+
+    // ================================================================
+    // DISPOSE
+    // ================================================================
+
+    public override void Dispose()
+    {
+        _restartSignal.Dispose();
+        base.Dispose();
     }
 }

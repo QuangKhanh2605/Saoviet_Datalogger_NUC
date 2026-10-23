@@ -2,34 +2,87 @@ using Database;
 using Database.Configuration;
 using Database.Services;
 using Database.Workers;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// =============================================================
+// APPSETTINGS - LOGGING
+// =============================================================
+
+builder
+    .Configuration.SetBasePath(AppContext.BaseDirectory)
+    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
 
 // =============================================================
 // RUNTIME CONFIGURATION
 // =============================================================
 
-builder.Configuration.AddJsonFile(RuntimePaths.AppSettings, optional: false, reloadOnChange: true);
+var runtimeConfig = new ConfigurationBuilder()
+    .SetBasePath(AppContext.BaseDirectory)
+    .AddJsonFile(RuntimePaths.AppSettings, optional: false, reloadOnChange: true)
+    .AddEnvironmentVariables()
+    .Build();
 
 // =============================================================
 // APP SETTINGS
 // =============================================================
 
-builder.Services.Configure<AppSettings>(builder.Configuration);
+builder.Services.AddSingleton<IConfigurationRoot>(runtimeConfig);
+
+builder.Services.Configure<AppSettings>(runtimeConfig);
 
 // =============================================================
 // WEB PORT
 // =============================================================
 
-int webPort = builder.Configuration.GetValue<int>("Web:Port");
+int webPort = runtimeConfig.GetValue<int>("Web:Port");
 
-if (webPort <= 0)
+if (webPort <= 0 || webPort > 65535)
 {
     throw new InvalidOperationException("Web:Port is not configured or invalid.");
 }
 
 builder.WebHost.UseUrls($"http://0.0.0.0:{webPort}");
+
+// =============================================================
+// REDIS
+// =============================================================
+
+builder.Services.AddSingleton<IConnectionMultiplexer>(serviceProvider =>
+{
+    var logger = serviceProvider
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger("Database.Redis");
+
+    string connectionString = runtimeConfig.GetConnectionString("Redis") ?? "localhost:6379";
+
+    ConfigurationOptions redisOptions;
+
+    try
+    {
+        redisOptions = ConfigurationOptions.Parse(connectionString);
+
+        redisOptions.AbortOnConnectFail = false;
+        redisOptions.ConnectTimeout = 3000;
+        redisOptions.ConnectRetry = 1;
+        redisOptions.ReconnectRetryPolicy = new ExponentialRetry(3000);
+
+        logger.LogInformation(
+            "Initializing Redis connection to {RedisEndpoint}.",
+            connectionString
+        );
+
+        return ConnectionMultiplexer.Connect(redisOptions);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Redis initialization failed for {RedisEndpoint}.", connectionString);
+
+        throw;
+    }
+});
 
 // =============================================================
 // SERVICES
@@ -39,27 +92,17 @@ builder.Services.AddSingleton<DatabaseService>();
 
 builder.Services.AddSingleton<MessageQueueService>();
 
-// =============================================================
-// HTTP CLIENT - MODBUS
-// =============================================================
-
-builder.Services.AddHttpClient(
-    "Modbus",
-    (serviceProvider, client) =>
-    {
-        AppSettings settings = serviceProvider.GetRequiredService<IOptions<AppSettings>>().Value;
-
-        client.BaseAddress = new Uri(settings.ModbusApi.BaseUrl);
-
-        client.Timeout = TimeSpan.FromSeconds(10);
-    }
-);
+builder.Services.AddSingleton<DatabaseConfigFileService>();
 
 // =============================================================
 // WORKER
 // =============================================================
 
-builder.Services.AddHostedService<DatabaseWorker>();
+builder.Services.AddSingleton<DatabaseWorker>();
+
+builder.Services.AddHostedService(serviceProvider =>
+    serviceProvider.GetRequiredService<DatabaseWorker>()
+);
 
 // =============================================================
 // BUILD
@@ -68,12 +111,30 @@ builder.Services.AddHostedService<DatabaseWorker>();
 var app = builder.Build();
 
 // =============================================================
-// DATABASE INITIALIZATION
+// STARTUP LOGGING
 // =============================================================
 
-DatabaseService database = app.Services.GetRequiredService<DatabaseService>();
+var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Database.Startup");
 
-database.Initialize();
+// =============================================================
+// SQLITE INITIALIZATION
+// =============================================================
+
+var database = app.Services.GetRequiredService<DatabaseService>();
+
+try
+{
+    database.Initialize();
+
+    logger.LogInformation("SQLite database initialized successfully.");
+}
+catch (Exception ex)
+{
+    logger.LogError(
+        ex,
+        "SQLite initialization failed. The application will continue starting; DatabaseWorker must retry initialization."
+    );
+}
 
 // =============================================================
 // API
@@ -84,5 +145,7 @@ DatabaseApi.MapEndpoints(app);
 // =============================================================
 // RUN
 // =============================================================
+
+logger.LogInformation("Database API is starting on port {WebPort}.", webPort);
 
 app.Run();

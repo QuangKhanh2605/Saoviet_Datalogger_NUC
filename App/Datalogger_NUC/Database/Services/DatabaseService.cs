@@ -1,3 +1,4 @@
+using System.Globalization;
 using Database.Configuration;
 using Database.Models;
 using Microsoft.Data.Sqlite;
@@ -6,8 +7,9 @@ namespace Database.Services;
 
 public sealed class DatabaseService
 {
-    private readonly string _connectionString;
     private readonly string _databasePath;
+    private readonly string _connectionString;
+    private readonly object _initializationLock = new();
 
     public DatabaseService()
     {
@@ -26,7 +28,6 @@ public sealed class DatabaseService
     private SqliteConnection OpenConnection()
     {
         var connection = new SqliteConnection(_connectionString);
-
         connection.Open();
 
         using var command = connection.CreateCommand();
@@ -44,87 +45,111 @@ public sealed class DatabaseService
     }
 
     // =========================================================
-    // INITIALIZE DATABASE
+    // INITIALIZATION
     // =========================================================
 
     public void Initialize()
     {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
+        lock (_initializationLock)
+        {
+            using var connection = OpenConnection();
+            using var command = connection.CreateCommand();
 
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS station_messages
-            (
-                message_id   INTEGER PRIMARY KEY,
-                timestamp    TEXT NOT NULL,
-                station_name TEXT NOT NULL,
-                mqtt_sent    INTEGER NOT NULL DEFAULT 0,
-                ftp_sent     INTEGER NOT NULL DEFAULT 0,
-                ftp2_sent    INTEGER NOT NULL DEFAULT 0
+            command.CommandText = """
+                CREATE TABLE IF NOT EXISTS station_messages
+                (
+                    message_id INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    station_name TEXT NOT NULL,
+                    mqtt_sent INTEGER NOT NULL DEFAULT 0,
+                    ftp_sent INTEGER NOT NULL DEFAULT 0,
+                    ftp2_sent INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS measurements
+                (
+                    message_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    unit TEXT NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    slave_id INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(message_id)
+                        REFERENCES station_messages(message_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_station_messages_station_timestamp
+                    ON station_messages(station_name, timestamp);
+
+                CREATE INDEX IF NOT EXISTS idx_station_messages_timestamp
+                    ON station_messages(timestamp);
+
+                CREATE INDEX IF NOT EXISTS idx_station_messages_mqtt_sent
+                    ON station_messages(mqtt_sent, timestamp, message_id);
+
+                CREATE INDEX IF NOT EXISTS idx_station_messages_ftp_sent
+                    ON station_messages(ftp_sent, timestamp, message_id);
+
+                CREATE INDEX IF NOT EXISTS idx_station_messages_ftp2_sent
+                    ON station_messages(ftp2_sent, timestamp, message_id);
+
+                CREATE INDEX IF NOT EXISTS idx_measurements_message_id
+                    ON measurements(message_id);
+                """;
+
+            command.ExecuteNonQuery();
+
+            EnsureColumnExists(
+                connection,
+                "measurements",
+                "slave_id",
+                "INTEGER NOT NULL DEFAULT 0"
             );
 
-            CREATE TABLE IF NOT EXISTS measurements
-            (
-                message_id INTEGER NOT NULL,
-                name       TEXT NOT NULL,
-                value      REAL NOT NULL,
-                unit       TEXT NOT NULL,
-                status     INTEGER NOT NULL,
-
-                FOREIGN KEY(message_id)
-                    REFERENCES station_messages(message_id)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS
-                idx_station_messages_station_time
-                ON station_messages(station_name, timestamp);
-
-            CREATE INDEX IF NOT EXISTS
-                idx_station_messages_timestamp
-                ON station_messages(timestamp, message_id);
-
-            CREATE INDEX IF NOT EXISTS
-                idx_station_messages_mqtt
-                ON station_messages(mqtt_sent, message_id);
-
-            CREATE INDEX IF NOT EXISTS
-                idx_station_messages_ftp
-                ON station_messages(ftp_sent, message_id);
-
-            CREATE INDEX IF NOT EXISTS
-                idx_station_messages_ftp2
-                ON station_messages(ftp2_sent, message_id);
-
-            CREATE INDEX IF NOT EXISTS
-                idx_measurements_message
-                ON measurements(message_id);
-            """;
-
-        command.ExecuteNonQuery();
-
-        Console.WriteLine("SQLite database initialized.");
+            Console.WriteLine("SQLite database initialized.");
+        }
     }
 
-    // =========================================================
-    // GET MAX MESSAGE ID
-    // =========================================================
-
-    public long GetMaxMessageId()
+    private static void EnsureColumnExists(
+        SqliteConnection connection,
+        string tableName,
+        string columnName,
+        string columnDefinition
+    )
     {
-        using var connection = OpenConnection();
         using var command = connection.CreateCommand();
 
-        command.CommandText = """
-            SELECT COALESCE(MAX(message_id), 0)
-            FROM station_messages;
-            """;
+        command.CommandText = $"PRAGMA table_info({tableName});";
 
-        return Convert.ToInt64(command.ExecuteScalar());
+        using var reader = command.ExecuteReader();
+
+        while (reader.Read())
+        {
+            if (
+                string.Equals(
+                    reader["name"]?.ToString(),
+                    columnName,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            {
+                return;
+            }
+        }
+
+        reader.Close();
+
+        using var alterCommand = connection.CreateCommand();
+
+        alterCommand.CommandText =
+            $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
+
+        alterCommand.ExecuteNonQuery();
     }
 
     // =========================================================
-    // SAVE MQTT
+    // SAVE MESSAGES
     // =========================================================
 
     public void SaveMqttMessages(IEnumerable<StationMessage> messages)
@@ -132,34 +157,19 @@ public sealed class DatabaseService
         SaveQueueMessages(messages, "mqtt_sent");
     }
 
-    // =========================================================
-    // SAVE FTP
-    // =========================================================
-
     public void SaveFtpMessages(IEnumerable<StationMessage> messages)
     {
         SaveQueueMessages(messages, "ftp_sent");
     }
-
-    // =========================================================
-    // SAVE FTP2
-    // =========================================================
 
     public void SaveFtp2Messages(IEnumerable<StationMessage> messages)
     {
         SaveQueueMessages(messages, "ftp2_sent");
     }
 
-    // =========================================================
-    // SAVE QUEUE MESSAGES
-    // =========================================================
-
     private void SaveQueueMessages(IEnumerable<StationMessage> messages, string sentColumn)
     {
-        if (sentColumn is not ("mqtt_sent" or "ftp_sent" or "ftp2_sent"))
-        {
-            throw new ArgumentException("Invalid sent column.", nameof(sentColumn));
-        }
+        ValidateSentColumn(sentColumn);
 
         List<StationMessage> messageList = messages.ToList();
 
@@ -173,130 +183,181 @@ public sealed class DatabaseService
 
         try
         {
-            using var existsCommand = connection.CreateCommand();
-
-            existsCommand.Transaction = transaction;
-
-            existsCommand.CommandText = """
-                SELECT EXISTS
-                (
-                    SELECT 1
-                    FROM station_messages
-                    WHERE message_id = $message_id
-                );
-                """;
-
-            var existsParameter = existsCommand.Parameters.Add("$message_id", SqliteType.Integer);
-
-            using var insertCommand = connection.CreateCommand();
-
-            insertCommand.Transaction = transaction;
-
-            insertCommand.CommandText = """
-                INSERT INTO station_messages
-                (
-                    message_id,
-                    timestamp,
-                    station_name,
-                    mqtt_sent,
-                    ftp_sent,
-                    ftp2_sent
-                )
-                VALUES
-                (
-                    $message_id,
-                    $timestamp,
-                    $station_name,
-                    $mqtt_sent,
-                    $ftp_sent,
-                    $ftp2_sent
-                );
-                """;
-
-            var insertId = insertCommand.Parameters.Add("$message_id", SqliteType.Integer);
-
-            var insertTimestamp = insertCommand.Parameters.Add("$timestamp", SqliteType.Text);
-
-            var insertStation = insertCommand.Parameters.Add("$station_name", SqliteType.Text);
-
-            var insertMqtt = insertCommand.Parameters.Add("$mqtt_sent", SqliteType.Integer);
-
-            var insertFtp = insertCommand.Parameters.Add("$ftp_sent", SqliteType.Integer);
-
-            var insertFtp2 = insertCommand.Parameters.Add("$ftp2_sent", SqliteType.Integer);
-
-            using var updateCommand = connection.CreateCommand();
-
-            updateCommand.Transaction = transaction;
-
-            updateCommand.CommandText = $"""
-                UPDATE station_messages
-                SET {sentColumn} = 1
-                WHERE message_id = $message_id;
-                """;
-
-            var updateId = updateCommand.Parameters.Add("$message_id", SqliteType.Integer);
-
             foreach (StationMessage message in messageList)
             {
                 ValidateMessage(message);
 
-                if (message.Id <= 0)
+                bool exists = MessageExists(connection, transaction, message.Id);
+
+                if (!exists)
                 {
-                    throw new ArgumentException(
-                        "Message ID must be generated before SQLite persistence."
-                    );
+                    InsertStationMessage(connection, transaction, message);
+
+                    InsertMeasurements(connection, transaction, message);
                 }
 
-                existsParameter.Value = message.Id;
-
-                bool exists = Convert.ToInt32(existsCommand.ExecuteScalar()) != 0;
-
-                if (exists)
+                bool sent = sentColumn switch
                 {
-                    bool sent = sentColumn switch
-                    {
-                        "mqtt_sent" => message.MqttSent,
-                        "ftp_sent" => message.FtpSent,
-                        "ftp2_sent" => message.Ftp2Sent,
-                        _ => false,
-                    };
+                    "mqtt_sent" => message.MqttSent,
+                    "ftp_sent" => message.FtpSent,
+                    "ftp2_sent" => message.Ftp2Sent,
+                    _ => false,
+                };
 
-                    // Không bao giờ reset TRUE -> FALSE.
-                    if (sent)
-                    {
-                        updateId.Value = message.Id;
-                        updateCommand.ExecuteNonQuery();
-                    }
+                if (sent)
+                {
+                    using var updateCommand = connection.CreateCommand();
 
-                    continue;
+                    updateCommand.Transaction = transaction;
+                    updateCommand.CommandText = $"""
+                        UPDATE station_messages
+                        SET {sentColumn} = 1
+                        WHERE message_id = @messageId;
+                        """;
+
+                    updateCommand.Parameters.AddWithValue("@messageId", message.Id);
+
+                    updateCommand.ExecuteNonQuery();
                 }
-
-                insertId.Value = message.Id;
-                insertTimestamp.Value = message.Timestamp;
-                insertStation.Value = message.StationName;
-
-                insertMqtt.Value = message.MqttSent ? 1 : 0;
-                insertFtp.Value = message.FtpSent ? 1 : 0;
-                insertFtp2.Value = message.Ftp2Sent ? 1 : 0;
-
-                insertCommand.ExecuteNonQuery();
-
-                InsertMeasurements(connection, transaction, message);
             }
 
             transaction.Commit();
         }
         catch
         {
-            transaction.Rollback();
+            try
+            {
+                transaction.Rollback();
+            }
+            catch
+            {
+                // Preserve the original exception.
+            }
+
             throw;
         }
     }
 
+    private static void ValidateMessage(StationMessage message)
+    {
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        if (message.Id <= 0)
+        {
+            throw new ArgumentException("Message Id must be greater than zero.");
+        }
+
+        if (string.IsNullOrWhiteSpace(message.Timestamp))
+        {
+            throw new ArgumentException($"Timestamp is empty for message {message.Id}.");
+        }
+
+        if (string.IsNullOrWhiteSpace(message.StationName))
+        {
+            throw new ArgumentException($"StationName is empty for message {message.Id}.");
+        }
+    }
+
+    private static bool MessageExists(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long messageId
+    )
+    {
+        using var command = connection.CreateCommand();
+
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS
+            (
+                SELECT 1
+                FROM station_messages
+                WHERE message_id = @messageId
+            );
+            """;
+
+        command.Parameters.AddWithValue("@messageId", messageId);
+
+        return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
     // =========================================================
-    // INSERT MEASUREMENTS
+    // PUBLIC MESSAGE EXISTS
     // =========================================================
+
+    /// <summary>
+    /// Kiểm tra message có tồn tại trong SQLite hay không.
+    /// Nếu SQLite gặp lỗi, exception sẽ được ném ra để tránh
+    /// xóa nhầm Redis status key.
+    /// </summary>
+    public bool MessageExists(long messageId)
+    {
+        if (messageId <= 0)
+        {
+            return false;
+        }
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = """
+            SELECT EXISTS
+            (
+                SELECT 1
+                FROM station_messages
+                WHERE message_id = @messageId
+            );
+            """;
+
+        command.Parameters.AddWithValue("@messageId", messageId);
+
+        object? result = command.ExecuteScalar();
+
+        return Convert.ToInt32(result, CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static void InsertStationMessage(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        StationMessage message
+    )
+    {
+        using var command = connection.CreateCommand();
+
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO station_messages
+            (
+                message_id,
+                timestamp,
+                station_name,
+                mqtt_sent,
+                ftp_sent,
+                ftp2_sent
+            )
+            VALUES
+            (
+                @messageId,
+                @timestamp,
+                @stationName,
+                @mqttSent,
+                @ftpSent,
+                @ftp2Sent
+            );
+            """;
+
+        command.Parameters.AddWithValue("@messageId", message.Id);
+        command.Parameters.AddWithValue("@timestamp", message.Timestamp);
+        command.Parameters.AddWithValue("@stationName", message.StationName);
+        command.Parameters.AddWithValue("@mqttSent", message.MqttSent ? 1 : 0);
+        command.Parameters.AddWithValue("@ftpSent", message.FtpSent ? 1 : 0);
+        command.Parameters.AddWithValue("@ftp2Sent", message.Ftp2Sent ? 1 : 0);
+
+        command.ExecuteNonQuery();
+    }
 
     private static void InsertMeasurements(
         SqliteConnection connection,
@@ -304,7 +365,7 @@ public sealed class DatabaseService
         StationMessage message
     )
     {
-        if (message.Measurements.Count == 0)
+        if (message.Measurements is null || message.Measurements.Count == 0)
         {
             return;
         }
@@ -312,7 +373,6 @@ public sealed class DatabaseService
         using var command = connection.CreateCommand();
 
         command.Transaction = transaction;
-
         command.CommandText = """
             INSERT INTO measurements
             (
@@ -320,147 +380,80 @@ public sealed class DatabaseService
                 name,
                 value,
                 unit,
-                status
+                status,
+                slave_id
             )
             VALUES
             (
-                $message_id,
-                $name,
-                $value,
-                $unit,
-                $status
+                @messageId,
+                @name,
+                @value,
+                @unit,
+                @status,
+                @slaveId
             );
             """;
 
-        var messageId = command.Parameters.Add("$message_id", SqliteType.Integer);
+        var messageIdParameter = command.Parameters.Add("@messageId", SqliteType.Integer);
 
-        var name = command.Parameters.Add("$name", SqliteType.Text);
+        var nameParameter = command.Parameters.Add("@name", SqliteType.Text);
 
-        var value = command.Parameters.Add("$value", SqliteType.Real);
+        var valueParameter = command.Parameters.Add("@value", SqliteType.Real);
 
-        var unit = command.Parameters.Add("$unit", SqliteType.Text);
+        var unitParameter = command.Parameters.Add("@unit", SqliteType.Text);
 
-        var status = command.Parameters.Add("$status", SqliteType.Integer);
+        var statusParameter = command.Parameters.Add("@status", SqliteType.Integer);
+
+        var slaveIdParameter = command.Parameters.Add("@slaveId", SqliteType.Integer);
 
         foreach (SensorReading reading in message.Measurements)
         {
-            messageId.Value = message.Id;
-            name.Value = reading.Name;
-            value.Value = reading.Value;
-            unit.Value = reading.Unit;
-            status.Value = reading.Status;
+            messageIdParameter.Value = message.Id;
+            nameParameter.Value = reading.Name ?? "";
+            valueParameter.Value = reading.Value;
+            unitParameter.Value = reading.Unit ?? "";
+            statusParameter.Value = reading.Status;
+            slaveIdParameter.Value = reading.SlaveId;
 
             command.ExecuteNonQuery();
         }
     }
 
     // =========================================================
-    // VALIDATE MESSAGE
-    // =========================================================
-
-    private static void ValidateMessage(StationMessage message)
-    {
-        if (string.IsNullOrWhiteSpace(message.StationName))
-        {
-            throw new ArgumentException("StationName cannot be empty.");
-        }
-
-        if (string.IsNullOrWhiteSpace(message.Timestamp))
-        {
-            throw new ArgumentException("Timestamp cannot be empty.");
-        }
-    }
-
-    // =========================================================
-    // PENDING MQTT
+    // PENDING MESSAGES
     // =========================================================
 
     public List<StationMessage> GetPendingMqttMessages(int maxMessages = 5)
     {
-        if (maxMessages <= 0)
-        {
-            return [];
-        }
-
-        using var connection = OpenConnection();
-
-        List<StationMessage> messages = GetPendingMessages(
-            connection,
-            "mqtt_sent = 0",
-            maxMessages
-        );
-
-        LoadMeasurements(connection, messages);
-
-        return messages;
+        return GetPendingMessages("mqtt_sent", maxMessages);
     }
-
-    // =========================================================
-    // PENDING FTP
-    // =========================================================
 
     public List<StationMessage> GetPendingFtpMessages(
         IEnumerable<string>? stationNames = null,
         int maxMessages = 50
     )
     {
-        if (maxMessages <= 0)
-        {
-            return [];
-        }
-
-        using var connection = OpenConnection();
-
-        List<StationMessage> messages = GetPendingFtpMessagesInternal(
-            connection,
-            stationNames,
-            ftp2: false,
-            maxMessages
-        );
-
-        LoadMeasurements(connection, messages);
-
-        return messages;
+        return GetPendingFtpMessagesInternal("ftp_sent", stationNames, maxMessages);
     }
-
-    // =========================================================
-    // PENDING FTP2
-    // =========================================================
 
     public List<StationMessage> GetPendingFtp2Messages(
         IEnumerable<string>? stationNames = null,
         int maxMessages = 50
     )
     {
+        return GetPendingFtpMessagesInternal("ftp2_sent", stationNames, maxMessages);
+    }
+
+    private List<StationMessage> GetPendingMessages(string sentColumn, int maxMessages)
+    {
+        ValidateSentColumn(sentColumn);
+
         if (maxMessages <= 0)
         {
-            return [];
+            return new List<StationMessage>();
         }
 
         using var connection = OpenConnection();
-
-        List<StationMessage> messages = GetPendingFtpMessagesInternal(
-            connection,
-            stationNames,
-            ftp2: true,
-            maxMessages
-        );
-
-        LoadMeasurements(connection, messages);
-
-        return messages;
-    }
-
-    // =========================================================
-    // GET PENDING MESSAGES
-    // =========================================================
-
-    private static List<StationMessage> GetPendingMessages(
-        SqliteConnection connection,
-        string condition,
-        int maxMessages
-    )
-    {
         using var command = connection.CreateCommand();
 
         command.CommandText = $"""
@@ -472,52 +465,57 @@ public sealed class DatabaseService
                 ftp_sent,
                 ftp2_sent
             FROM station_messages
-            WHERE {condition}
+            WHERE {sentColumn} = 0
             ORDER BY timestamp, message_id
-            LIMIT $limit;
+            LIMIT @limit;
             """;
 
-        command.Parameters.AddWithValue("$limit", maxMessages);
+        command.Parameters.AddWithValue("@limit", maxMessages);
 
-        return ReadMessages(command);
+        List<StationMessage> messages = ReadMessages(connection, command);
+
+        LoadMeasurements(connection, messages);
+
+        return messages;
     }
 
-    // =========================================================
-    // GET PENDING FTP / FTP2
-    // =========================================================
-
-    private static List<StationMessage> GetPendingFtpMessagesInternal(
-        SqliteConnection connection,
+    private List<StationMessage> GetPendingFtpMessagesInternal(
+        string sentColumn,
         IEnumerable<string>? stationNames,
-        bool ftp2,
         int maxMessages
     )
     {
-        string sentColumn = ftp2 ? "ftp2_sent" : "ftp_sent";
+        ValidateSentColumn(sentColumn);
 
+        if (maxMessages <= 0)
+        {
+            return new List<StationMessage>();
+        }
+
+        string[] stations =
+            stationNames
+                ?.Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+            ?? Array.Empty<string>();
+
+        using var connection = OpenConnection();
         using var command = connection.CreateCommand();
 
-        List<string>? names = stationNames
-            ?.Where(x => !string.IsNullOrWhiteSpace(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        string stationFilter = "";
 
-        string stationCondition = "";
-
-        if (names is { Count: > 0 })
+        if (stations.Length > 0)
         {
-            var parameters = new List<string>(names.Count);
+            string[] parameterNames = new string[stations.Length];
 
-            for (int i = 0; i < names.Count; i++)
+            for (int i = 0; i < stations.Length; i++)
             {
-                string parameterName = $"$station{i}";
+                parameterNames[i] = $"@station{i}";
 
-                parameters.Add(parameterName);
-
-                command.Parameters.AddWithValue(parameterName, names[i]);
+                command.Parameters.AddWithValue(parameterNames[i], stations[i]);
             }
 
-            stationCondition = $"AND station_name IN ({string.Join(", ", parameters)})";
+            stationFilter = $" AND station_name IN ({string.Join(", ", parameterNames)})";
         }
 
         command.CommandText = $"""
@@ -530,23 +528,34 @@ public sealed class DatabaseService
                 ftp2_sent
             FROM station_messages
             WHERE {sentColumn} = 0
-            {stationCondition}
+            {stationFilter}
             ORDER BY timestamp, message_id
-            LIMIT $limit;
+            LIMIT @limit;
             """;
 
-        command.Parameters.AddWithValue("$limit", maxMessages);
+        command.Parameters.AddWithValue("@limit", maxMessages);
 
-        return ReadMessages(command);
+        List<StationMessage> messages = ReadMessages(connection, command);
+
+        LoadMeasurements(connection, messages);
+
+        return messages;
     }
 
-    // =========================================================
-    // READ MESSAGES
-    // =========================================================
-
-    private static List<StationMessage> ReadMessages(SqliteCommand command)
+    private static void ValidateSentColumn(string sentColumn)
     {
-        var messages = new List<StationMessage>();
+        if (sentColumn is not ("mqtt_sent" or "ftp_sent" or "ftp2_sent"))
+        {
+            throw new ArgumentException("Invalid sent column.", nameof(sentColumn));
+        }
+    }
+
+    private static List<StationMessage> ReadMessages(
+        SqliteConnection connection,
+        SqliteCommand command
+    )
+    {
+        List<StationMessage> messages = new();
 
         using var reader = command.ExecuteReader();
 
@@ -558,20 +567,15 @@ public sealed class DatabaseService
                     Id = reader.GetInt64(0),
                     Timestamp = reader.GetString(1),
                     StationName = reader.GetString(2),
-
-                    MqttSent = reader.GetInt64(3) != 0,
-                    FtpSent = reader.GetInt64(4) != 0,
-                    Ftp2Sent = reader.GetInt64(5) != 0,
+                    MqttSent = reader.GetInt32(3) == 1,
+                    FtpSent = reader.GetInt32(4) == 1,
+                    Ftp2Sent = reader.GetInt32(5) == 1,
                 }
             );
         }
 
         return messages;
     }
-
-    // =========================================================
-    // LOAD MEASUREMENTS
-    // =========================================================
 
     private static void LoadMeasurements(SqliteConnection connection, List<StationMessage> messages)
     {
@@ -580,36 +584,30 @@ public sealed class DatabaseService
             return;
         }
 
-        var messageMap = messages.ToDictionary(x => x.Id);
+        Dictionary<long, StationMessage> messageById = messages.ToDictionary(message => message.Id);
 
         using var command = connection.CreateCommand();
 
-        var parameters = new List<string>(messages.Count);
+        string[] parameters = new string[messages.Count];
 
         for (int i = 0; i < messages.Count; i++)
         {
-            string parameterName = $"$id{i}";
+            parameters[i] = $"@id{i}";
 
-            parameters.Add(parameterName);
-
-            command.Parameters.AddWithValue(parameterName, messages[i].Id);
+            command.Parameters.AddWithValue(parameters[i], messages[i].Id);
         }
 
         command.CommandText = $"""
             SELECT
-                m.message_id,
-                m.name,
-                m.value,
-                m.unit,
-                m.status,
-                sm.station_name,
-                sm.timestamp
-            FROM measurements m
-            INNER JOIN station_messages sm
-                ON sm.message_id = m.message_id
-            WHERE m.message_id IN
-                ({string.Join(", ", parameters)})
-            ORDER BY m.message_id;
+                message_id,
+                name,
+                value,
+                unit,
+                status,
+                slave_id
+            FROM measurements
+            WHERE message_id IN ({string.Join(", ", parameters)})
+            ORDER BY message_id;
             """;
 
         using var reader = command.ExecuteReader();
@@ -618,7 +616,7 @@ public sealed class DatabaseService
         {
             long messageId = reader.GetInt64(0);
 
-            if (!messageMap.TryGetValue(messageId, out StationMessage? message))
+            if (!messageById.TryGetValue(messageId, out StationMessage? message))
             {
                 continue;
             }
@@ -626,19 +624,20 @@ public sealed class DatabaseService
             message.Measurements.Add(
                 new SensorReading
                 {
+                    StationName = message.StationName,
+                    Timestamp = message.Timestamp,
                     Name = reader.GetString(1),
                     Value = reader.GetDouble(2),
                     Unit = reader.GetString(3),
                     Status = reader.GetInt32(4),
-                    StationName = reader.GetString(5),
-                    Timestamp = reader.GetString(6),
+                    SlaveId = checked((byte)reader.GetInt32(5)),
                 }
             );
         }
     }
 
     // =========================================================
-    // MARK MQTT SENT
+    // MARK SENT
     // =========================================================
 
     public void MarkMqttSent(IEnumerable<long> messageIds)
@@ -646,40 +645,25 @@ public sealed class DatabaseService
         MarkSent(messageIds, "mqtt_sent");
     }
 
-    // =========================================================
-    // MARK FTP SENT
-    // =========================================================
-
     public void MarkFtpSent(IEnumerable<long> messageIds)
     {
         MarkSent(messageIds, "ftp_sent");
     }
-
-    // =========================================================
-    // MARK FTP2 SENT
-    // =========================================================
 
     public void MarkFtp2Sent(IEnumerable<long> messageIds)
     {
         MarkSent(messageIds, "ftp2_sent");
     }
 
-    // =========================================================
-    // MARK SENT
-    // =========================================================
-
     private void MarkSent(IEnumerable<long> messageIds, string columnName)
     {
-        List<long> ids = messageIds.Distinct().ToList();
+        ValidateSentColumn(columnName);
 
-        if (ids.Count == 0)
+        long[] ids = messageIds.Where(id => id > 0).Distinct().ToArray();
+
+        if (ids.Length == 0)
         {
             return;
-        }
-
-        if (columnName is not ("mqtt_sent" or "ftp_sent" or "ftp2_sent"))
-        {
-            throw new ArgumentException("Invalid sent column.", nameof(columnName));
         }
 
         using var connection = OpenConnection();
@@ -690,19 +674,17 @@ public sealed class DatabaseService
             using var command = connection.CreateCommand();
 
             command.Transaction = transaction;
-
             command.CommandText = $"""
                 UPDATE station_messages
                 SET {columnName} = 1
-                WHERE message_id = $message_id;
+                WHERE message_id = @messageId;
                 """;
 
-            var parameter = command.Parameters.Add("$message_id", SqliteType.Integer);
+            var parameter = command.Parameters.Add("@messageId", SqliteType.Integer);
 
             foreach (long id in ids)
             {
                 parameter.Value = id;
-
                 command.ExecuteNonQuery();
             }
 
@@ -710,80 +692,73 @@ public sealed class DatabaseService
         }
         catch
         {
-            transaction.Rollback();
+            try
+            {
+                transaction.Rollback();
+            }
+            catch
+            {
+                // Preserve the original exception.
+            }
+
             throw;
         }
     }
 
     // =========================================================
-    // DATABASE SIZE
+    // CLEANUP
     // =========================================================
 
-    private long GetDatabaseSizeBytes()
+    public long GetDatabaseSizeBytes()
     {
         long size = 0;
 
-        if (File.Exists(_databasePath))
+        string[] files = { _databasePath, _databasePath + "-wal", _databasePath + "-shm" };
+
+        foreach (string file in files)
         {
-            size += new FileInfo(_databasePath).Length;
-        }
-
-        string walPath = _databasePath + "-wal";
-
-        if (File.Exists(walPath))
-        {
-            size += new FileInfo(walPath).Length;
-        }
-
-        string shmPath = _databasePath + "-shm";
-
-        if (File.Exists(shmPath))
-        {
-            size += new FileInfo(shmPath).Length;
+            if (File.Exists(file))
+            {
+                size += new FileInfo(file).Length;
+            }
         }
 
         return size;
     }
 
-    // =========================================================
-    // DELETE EXPIRED DATA
-    // =========================================================
-
-    private static int DeleteExpiredData(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        int retentionDays
-    )
+    public int DeleteExpiredData(int retentionDays)
     {
-        string cutoff = DateTime.Now.AddDays(-retentionDays).ToString("yyyyMMddHHmmss");
+        if (retentionDays <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(retentionDays));
+        }
 
+        string cutoff = DateTime
+            .Now.AddDays(-retentionDays)
+            .ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+
+        using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-
-        command.Transaction = transaction;
 
         command.CommandText = """
             DELETE FROM station_messages
-            WHERE timestamp < $cutoff;
+            WHERE timestamp < @cutoff;
             """;
 
-        command.Parameters.AddWithValue("$cutoff", cutoff);
+        command.Parameters.AddWithValue("@cutoff", cutoff);
 
         return command.ExecuteNonQuery();
     }
 
-    // =========================================================
-    // DELETE OLDEST
-    // =========================================================
-
-    private static int DeleteOldestMessages(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        int batchSize
-    )
+    public int DeleteOldestMessages(int batchSize)
     {
-        using var command = connection.CreateCommand();
+        if (batchSize <= 0)
+        {
+            return 0;
+        }
 
-        command.Transaction = transaction;
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
 
         command.CommandText = """
             DELETE FROM station_messages
@@ -792,52 +767,34 @@ public sealed class DatabaseService
                 SELECT message_id
                 FROM station_messages
                 ORDER BY timestamp, message_id
-                LIMIT $batchSize
+                LIMIT @limit
             );
             """;
 
-        command.Parameters.AddWithValue("$batchSize", batchSize);
+        command.Parameters.AddWithValue("@limit", batchSize);
 
         return command.ExecuteNonQuery();
     }
 
-    // =========================================================
-    // CHECKPOINT WAL
-    // =========================================================
-
-    private void CheckpointWal()
+    public void CheckpointWal()
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
 
         command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-
         command.ExecuteNonQuery();
     }
 
-    // =========================================================
-    // VACUUM
-    // =========================================================
-
-    private void Vacuum()
+    public void Vacuum()
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
 
         command.CommandText = "VACUUM;";
-
         command.ExecuteNonQuery();
     }
 
-    // =========================================================
-    // CLEANUP DATABASE
-    // =========================================================
-
-    public DatabaseCleanupResult CleanupDatabase(
-        int retentionDays,
-        int maxDatabaseSizeMB,
-        bool vacuumAfterCleanup
-    )
+    public void CleanupDatabase(int retentionDays, long maxDatabaseSizeMB, bool vacuumAfterCleanup)
     {
         if (retentionDays <= 0)
         {
@@ -849,81 +806,31 @@ public sealed class DatabaseService
             throw new ArgumentOutOfRangeException(nameof(maxDatabaseSizeMB));
         }
 
-        long maxBytes = (long)maxDatabaseSizeMB * 1024 * 1024;
+        int deletedExpired = DeleteExpiredData(retentionDays);
 
-        var result = new DatabaseCleanupResult { SizeBeforeBytes = GetDatabaseSizeBytes() };
+        long maxBytes = checked(maxDatabaseSizeMB * 1024L * 1024L);
 
-        bool deleted = false;
-
-        using (var connection = OpenConnection())
-        using (var transaction = connection.BeginTransaction())
-        {
-            try
-            {
-                result.DeletedByRetention = DeleteExpiredData(
-                    connection,
-                    transaction,
-                    retentionDays
-                );
-
-                if (result.DeletedByRetention > 0)
-                {
-                    deleted = true;
-                }
-
-                transaction.Commit();
-            }
-            catch
-            {
-                transaction.Rollback();
-                throw;
-            }
-        }
+        const int batchSize = 1000;
 
         while (GetDatabaseSizeBytes() > maxBytes)
         {
-            int deletedCount;
+            int deleted = DeleteOldestMessages(batchSize);
 
-            using (var connection = OpenConnection())
-            using (var transaction = connection.BeginTransaction())
-            {
-                try
-                {
-                    deletedCount = DeleteOldestMessages(connection, transaction, 1000);
-
-                    transaction.Commit();
-                }
-                catch
-                {
-                    transaction.Rollback();
-                    throw;
-                }
-            }
-
-            if (deletedCount == 0)
+            if (deleted == 0)
             {
                 break;
             }
-
-            result.DeletedBySize += deletedCount;
-
-            deleted = true;
-
-            CheckpointWal();
         }
 
-        if (deleted)
+        CheckpointWal();
+
+        if (vacuumAfterCleanup)
         {
-            CheckpointWal();
-
-            if (vacuumAfterCleanup)
-            {
-                Vacuum();
-            }
+            Vacuum();
         }
 
-        result.SizeAfterBytes = GetDatabaseSizeBytes();
-
-        return result;
+        Console.WriteLine(
+            $"Database cleanup completed. Expired messages deleted: {deletedExpired}. Current size: {GetDatabaseSizeBytes()} bytes."
+        );
     }
 }

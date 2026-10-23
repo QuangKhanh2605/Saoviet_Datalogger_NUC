@@ -1,9 +1,12 @@
 {
   "version": 2,
-  "dgSpecHash": "lbUynMMjt3A=",
+  "dgSpecHash": "WdGytEfn3T4=",
   "success": true,
-  "projectFilePath": "D:\\Datalogger_NUC\\Modbus\\Modbus.csproj",
+  "projectFilePath": "D:\\Csharp\\Datalogger_NUC\\modbus\\Modbus.csproj",
   "expectedPackageFiles": [
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\10.0.5\\microsoft.extensions.dependencyinjection.abstractions.10.0.5.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\10.0.5\\microsoft.extensions.logging.abstractions.10.0.5.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\respite\\3.4.0\\respite.3.4.0.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\runtime.android-arm.runtime.native.system.io.ports\\10.0.0\\runtime.android-arm.runtime.native.system.io.ports.10.0.0.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\runtime.android-arm64.runtime.native.system.io.ports\\10.0.0\\runtime.android-arm64.runtime.native.system.io.ports.10.0.0.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\runtime.android-x64.runtime.native.system.io.ports\\10.0.0\\runtime.android-x64.runtime.native.system.io.ports.10.0.0.nupkg.sha512",
@@ -21,7 +24,15 @@
     "C:\\Users\\PC\\.nuget\\packages\\runtime.native.system.io.ports\\10.0.0\\runtime.native.system.io.ports.10.0.0.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\runtime.osx-arm64.runtime.native.system.io.ports\\10.0.0\\runtime.osx-arm64.runtime.native.system.io.ports.10.0.0.nupkg.sha512",
     "C:\\Users\\PC\\.nuget\\packages\\runtime.osx-x64.runtime.native.system.io.ports\\10.0.0\\runtime.osx-x64.runtime.native.system.io.ports.10.0.0.nupkg.sha512",
-    "C:\\Users\\PC\\.nuget\\packages\\system.io.ports\\10.0.0\\system.io.ports.10.0.0.nupkg.sha512"
+    "C:\\Users\\PC\\.nuget\\packages\\stackexchange.redis\\3.4.0\\stackexchange.redis.3.4.0.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\system.diagnostics.diagnosticsource\\10.0.5\\system.diagnostics.diagnosticsource.10.0.5.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\system.io.hashing\\10.0.12\\system.io.hashing.10.0.12.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\system.io.pipelines\\10.0.5\\system.io.pipelines.10.0.5.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\system.io.ports\\10.0.0\\system.io.ports.10.0.0.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.30\\microsoft.netcore.app.ref.8.0.30.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.30\\microsoft.windowsdesktop.app.ref.8.0.30.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.30\\microsoft.aspnetcore.app.ref.8.0.30.nupkg.sha512",
+    "C:\\Users\\PC\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.30\\microsoft.netcore.app.host.win-x64.8.0.30.nupkg.sha512"
   ],
   "logs": []
 }

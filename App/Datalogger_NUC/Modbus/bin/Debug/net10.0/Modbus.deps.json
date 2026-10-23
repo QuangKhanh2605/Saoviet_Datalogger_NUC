@@ -8,10 +8,19 @@
     ".NETCoreApp,Version=v10.0": {
       "Modbus/1.0.0": {
         "dependencies": {
+          "StackExchange.Redis": "3.4.0",
           "System.IO.Ports": "10.0.0"
         },
         "runtime": {
           "Modbus.dll": {}
+        }
+      },
+      "RESPite/3.4.0": {
+        "runtime": {
+          "lib/net10.0/RESPite.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.4.0.59332"
+          }
         }
       },
       "runtime.android-arm.runtime.native.System.IO.Ports/10.0.0": {
@@ -178,6 +187,26 @@
           }
         }
       },
+      "StackExchange.Redis/3.4.0": {
+        "dependencies": {
+          "RESPite": "3.4.0",
+          "System.IO.Hashing": "10.0.12"
+        },
+        "runtime": {
+          "lib/net10.0/StackExchange.Redis.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.4.0.59332"
+          }
+        }
+      },
+      "System.IO.Hashing/10.0.12": {
+        "runtime": {
+          "lib/net10.0/System.IO.Hashing.dll": {
+            "assemblyVersion": "10.0.0.12",
+            "fileVersion": "10.0.1226.42308"
+          }
+        }
+      },
       "System.IO.Ports/10.0.0": {
         "dependencies": {
           "runtime.native.System.IO.Ports": "10.0.0"
@@ -210,6 +239,13 @@
       "type": "project",
       "serviceable": false,
       "sha512": ""
+    },
+    "RESPite/3.4.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-BEdf42Eugi6oNw84vSQuLvYOzoY9KLv6gKsxFbSbv1zm23DiCULeQ8jobRgGip43T0GoAJstFW0TXvKRx9Ewlg==",
+      "path": "respite/3.4.0",
+      "hashPath": "respite.3.4.0.nupkg.sha512"
     },
     "runtime.android-arm.runtime.native.System.IO.Ports/10.0.0": {
       "type": "package",
@@ -329,6 +365,20 @@
       "sha512": "sha512-kggkJk7S8OcoOLa9OyrP2zQ/eStiKHOytWVK8lJuRckzcz52eUgDo66+d9n2KciukcNmeAbmSHEY6fh2n394Jg==",
       "path": "runtime.osx-x64.runtime.native.system.io.ports/10.0.0",
       "hashPath": "runtime.osx-x64.runtime.native.system.io.ports.10.0.0.nupkg.sha512"
+    },
+    "StackExchange.Redis/3.4.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-29fvhba1pHQ2Vs+FIiG2201G62xL4EayGMm7yNZrHh/IcOZbzhl4g1CKQQP9xhznzDHybFURyj3XN433QctdPA==",
+      "path": "stackexchange.redis/3.4.0",
+      "hashPath": "stackexchange.redis.3.4.0.nupkg.sha512"
+    },
+    "System.IO.Hashing/10.0.12": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jDix4bBMYnpZdSPcnY+KDV6ik3SRMzpMKby/bZl/XUwIiflwRNAFZ0oOl61R/pSaveIJ8t1gs2BUlrGsPs/bcg==",
+      "path": "system.io.hashing/10.0.12",
+      "hashPath": "system.io.hashing.10.0.12.nupkg.sha512"
     },
     "System.IO.Ports/10.0.0": {
       "type": "package",

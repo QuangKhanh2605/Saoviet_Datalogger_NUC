@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using Mqtt.Configuration;
+using MQTTnet;
 
 namespace Mqtt.Mqtt.Core;
 
@@ -12,39 +13,23 @@ public sealed class MqttConnectionManager
     private readonly MqttService _mqtt;
     private readonly AppSettings _settings;
 
-    // =========================================================
-    // SYNCHRONIZATION
-    // =========================================================
-
-    // Đảm bảo Connect / Disconnect không chạy đồng thời.
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
-
-    // Đánh thức connection loop ngay lập tức khi cần reconnect.
     private readonly SemaphoreSlim _reconnectSignal = new(0, 1);
-
-    // Bảo vệ state nội bộ.
     private readonly object _stateLock = new();
-
-    // =========================================================
-    // CONNECTION STATE
-    // =========================================================
 
     private MqttServerType _currentServer = MqttServerType.Main;
 
+    // Số lần kết nối thất bại liên tiếp trước khi MQTT đạt READY.
     private int _consecutiveConnectFailures;
+
+    // Ngăn sự kiện Disconnect chủ động bị tính là lỗi.
+    private int _intentionalDisconnect;
 
     private bool _reconnectRequested;
     private bool _switchServerOnReconnect;
 
-    // MQTT CONNECT
     private TaskCompletionSource<bool> _connectedTcs = CreateSignal();
-
-    // MQTT CONNECT + SUBSCRIBER
     private TaskCompletionSource<bool> _readyTcs = CreateSignal();
-
-    // =========================================================
-    // PROPERTIES
-    // =========================================================
 
     public MqttServerType CurrentServer
     {
@@ -59,19 +44,12 @@ public sealed class MqttConnectionManager
 
     public string CurrentServerName => CurrentServer == MqttServerType.Main ? "Main" : "Backup";
 
-    // =========================================================
-    // MQTT SERVER IP ĐANG KẾT NỐI
-    // =========================================================
-
     public string CurrentServerIp
     {
         get
         {
             MqttServerType server = CurrentServer;
-
-            MqttServerSettings settings = GetServerSettings(server);
-
-            return settings.IP;
+            return GetServerSettings(server).IP;
         }
     }
 
@@ -92,10 +70,6 @@ public sealed class MqttConnectionManager
             }
         }
     }
-
-    // =========================================================
-    // CONSTRUCTOR
-    // =========================================================
 
     public MqttConnectionManager(
         ILogger<MqttConnectionManager> logger,
@@ -124,10 +98,6 @@ public sealed class MqttConnectionManager
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // -------------------------------------------------
-                // RECONNECT REQUEST
-                // -------------------------------------------------
-
                 ReconnectRequest request = ConsumeReconnectRequest();
 
                 if (request.Requested)
@@ -140,10 +110,6 @@ public sealed class MqttConnectionManager
                     await DisconnectAsync(cancellationToken);
                 }
 
-                // -------------------------------------------------
-                // CONNECT
-                // -------------------------------------------------
-
                 if (!_mqtt.IsConnected)
                 {
                     MarkDisconnected();
@@ -155,10 +121,6 @@ public sealed class MqttConnectionManager
                         SwitchServer();
                     }
                 }
-
-                // -------------------------------------------------
-                // WAIT
-                // -------------------------------------------------
 
                 await WaitForNextConnectionCheckAsync(cancellationToken);
             }
@@ -190,37 +152,39 @@ public sealed class MqttConnectionManager
             if (_mqtt.IsConnected)
             {
                 MarkConnected();
-
                 return ConnectResult.Connected;
             }
 
             MqttServerType serverType = CurrentServer;
-
             MqttServerSettings server = GetServerSettings(serverType);
 
             try
             {
+                int attempt = Volatile.Read(ref _consecutiveConnectFailures) + 1;
+
                 _logger.LogInformation(
                     "MQTT connecting | Server={Server} | IP={IP} | Attempt={Attempt}/{Max}",
                     serverType,
                     server.IP,
-                    _consecutiveConnectFailures + 1,
+                    attempt,
                     MaxConnectFailuresPerServer
                 );
 
                 await _mqtt.ConnectAsync(server, cancellationToken);
 
-                // Connect thành công.
-                _consecutiveConnectFailures = 0;
-
                 MarkConnected();
                 MarkNotReady();
 
                 _logger.LogInformation(
-                    "MQTT connected | Server={Server} | IP={IP}",
+                    "MQTT TCP session connected | Server={Server} | IP={IP} | Attempt={Attempt}/{Max}",
                     serverType,
-                    server.IP
+                    server.IP,
+                    Volatile.Read(ref _consecutiveConnectFailures) + 1,
+                    MaxConnectFailuresPerServer
                 );
+
+                // Không đặt lại bộ đếm ở đây.
+                // Chỉ MarkReady mới xác nhận kết nối đã ổn định.
 
                 return ConnectResult.Connected;
             }
@@ -230,20 +194,20 @@ public sealed class MqttConnectionManager
             }
             catch (Exception ex)
             {
-                _consecutiveConnectFailures++;
+                int failures = Interlocked.Increment(ref _consecutiveConnectFailures);
 
                 _logger.LogWarning(
                     ex,
                     "MQTT connection failed | Server={Server} | IP={IP} | Failure={Failure}/{Max}",
                     serverType,
                     server.IP,
-                    _consecutiveConnectFailures,
+                    failures,
                     MaxConnectFailuresPerServer
                 );
 
-                if (_consecutiveConnectFailures >= MaxConnectFailuresPerServer)
+                if (failures >= MaxConnectFailuresPerServer)
                 {
-                    _consecutiveConnectFailures = 0;
+                    Interlocked.Exchange(ref _consecutiveConnectFailures, 0);
 
                     return ConnectResult.SwitchServer;
                 }
@@ -327,6 +291,10 @@ public sealed class MqttConnectionManager
 
             _readyTcs.TrySetResult(true);
         }
+
+        // MQTT đã kết nối và hoàn tất khởi tạo Subscriber.
+        // Bắt đầu chu kỳ đếm lỗi mới từ trạng thái ổn định.
+        Interlocked.Exchange(ref _consecutiveConnectFailures, 0);
 
         _logger.LogInformation(
             "MQTT READY | Server={Server} | IP={IP}",
@@ -415,10 +383,17 @@ public sealed class MqttConnectionManager
         {
             if (_mqtt.IsConnected)
             {
-                await _mqtt.DisconnectAsync(cancellationToken);
-            }
+                Interlocked.Exchange(ref _intentionalDisconnect, 1);
 
-            _consecutiveConnectFailures = 0;
+                try
+                {
+                    await _mqtt.DisconnectAsync(cancellationToken);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _intentionalDisconnect, 0);
+                }
+            }
         }
         finally
         {
@@ -430,19 +405,49 @@ public sealed class MqttConnectionManager
     // MQTT DISCONNECTED EVENT
     // =========================================================
 
-    private void OnMqttDisconnected()
+    private void OnMqttDisconnected(MqttClientDisconnectedEventArgs args)
     {
         MarkDisconnected();
         MarkNotReady();
 
+        bool intentional = Volatile.Read(ref _intentionalDisconnect) != 0;
+
         _logger.LogWarning(
-            "MQTT disconnected | Server={Server} | IP={IP}",
+            "MQTT disconnected | Server={Server} | IP={IP} | ClientWasConnected={ClientWasConnected} | Reason={Reason} | ReasonString={ReasonString} | Exception={Exception} | Intentional={Intentional}",
             CurrentServerName,
-            CurrentServerIp
+            CurrentServerIp,
+            args.ClientWasConnected,
+            args.Reason,
+            args.ReasonString,
+            args.Exception?.ToString() ?? "None",
+            intentional
         );
 
-        // Đánh thức connection loop ngay lập tức.
-        SignalReconnect();
+        if (intentional || !args.ClientWasConnected)
+        {
+            return;
+        }
+
+        // Kết nối đã được thiết lập nhưng bị ngắt bất ngờ.
+        // Tính lần ngắt này vào chuỗi lỗi kết nối.
+        int failures = Interlocked.Increment(ref _consecutiveConnectFailures);
+
+        _logger.LogWarning(
+            "MQTT connection lost | Server={Server} | ConsecutiveFailures={Failures}/{Max}",
+            CurrentServerName,
+            failures,
+            MaxConnectFailuresPerServer
+        );
+
+        if (failures >= MaxConnectFailuresPerServer)
+        {
+            Interlocked.Exchange(ref _consecutiveConnectFailures, 0);
+
+            RequestReconnect(switchServer: true);
+        }
+
+        // Không SignalReconnect ở đây khi chưa đủ 5 lần.
+        // Vòng lặp sẽ thử lại sau khoảng chờ kiểm tra kết nối.
     }
 
     // =========================================================
@@ -456,6 +461,8 @@ public sealed class MqttConnectionManager
             _currentServer =
                 _currentServer == MqttServerType.Main ? MqttServerType.Backup : MqttServerType.Main;
         }
+
+        Interlocked.Exchange(ref _consecutiveConnectFailures, 0);
 
         _logger.LogWarning(
             "MQTT switching server | NewServer={Server} | IP={IP}",
@@ -479,15 +486,6 @@ public sealed class MqttConnectionManager
 
     private async Task WaitForNextConnectionCheckAsync(CancellationToken cancellationToken)
     {
-        /*
-         * Chờ tối đa 1000 ms.
-         *
-         * Nếu có reconnect signal:
-         *     -> tỉnh dậy ngay.
-         *
-         * Nếu không:
-         *     -> sau 1000 ms kiểm tra connection lại.
-         */
         await _reconnectSignal.WaitAsync(
             TimeSpan.FromMilliseconds(ConnectionLoopDelayMilliseconds),
             cancellationToken

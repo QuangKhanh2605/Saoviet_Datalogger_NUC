@@ -1,22 +1,22 @@
-using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Mqtt.Configuration;
 using Mqtt.Mqtt.Core;
 using Mqtt.Mqtt.Models;
+using StackExchange.Redis;
 
 namespace Mqtt.Mqtt.Publishing;
 
-public sealed class MqttPublishManager : BackgroundService
+public sealed class MqttPublishManager
 {
     // ============================================================
     // CẤU HÌNH
     // ============================================================
 
-    private const int PublishDelayMilliseconds = 500;
+    private const int PublishDelayMilliseconds = 2000;
     private const int MaxPublishFailures = 5;
     private const int DatabaseBatchSize = 10;
+    private const string MqttStream = "database:stream:mqtt";
 
     // ============================================================
     // MQTT PUBLISH PRIORITY
@@ -35,21 +35,13 @@ public sealed class MqttPublishManager : BackgroundService
     // ============================================================
 
     private readonly ILogger<MqttPublishManager> _logger;
-
     private readonly MqttPublisher _publisher;
     private readonly MqttConnectionManager _connection;
-
-    // HTTP client gọi Database API
-    private readonly HttpClient _databaseApi;
-
+    private readonly IDatabase _redis;
     private readonly AppSettings _settings;
-
     private readonly SemaphoreSlim _publishSignal = new(0, 1);
-
     private readonly object _lock = new();
-
     private readonly Dictionary<string, PendingPublish> _pending = new();
-
     private readonly Dictionary<string, PublishDefinition> _definitions;
 
     // ============================================================
@@ -60,16 +52,14 @@ public sealed class MqttPublishManager : BackgroundService
         ILogger<MqttPublishManager> logger,
         MqttPublisher publisher,
         MqttConnectionManager connection,
-        IHttpClientFactory httpClientFactory,
+        IConnectionMultiplexer redis,
         IOptions<AppSettings> options
     )
     {
         _logger = logger;
         _publisher = publisher;
         _connection = connection;
-
-        _databaseApi = httpClientFactory.CreateClient("DatabaseApi");
-
+        _redis = redis.GetDatabase();
         _settings = options.Value;
 
         _definitions = new Dictionary<string, PublishDefinition>
@@ -124,6 +114,7 @@ public sealed class MqttPublishManager : BackgroundService
                 Payload = payload,
                 Data = null,
                 ConsecutiveFailures = 0,
+                Published = false,
             };
 
             if (_publishSignal.CurrentCount == 0)
@@ -134,30 +125,6 @@ public sealed class MqttPublishManager : BackgroundService
     }
 
     // ============================================================
-    // BACKGROUND LOOP
-    // ============================================================
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        _logger.LogInformation("MQTT PublishManager started.");
-
-        try
-        {
-            await RunAsync(stoppingToken);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            // Application shutdown bình thường.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "MQTT PublishManager stopped because of unexpected error.");
-        }
-
-        _logger.LogInformation("MQTT PublishManager stopped.");
-    }
-
-    // ============================================================
     // MAIN LOOP
     // ============================================================
 
@@ -165,29 +132,19 @@ public sealed class MqttPublishManager : BackgroundService
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            // ----------------------------------------------------
             // Chờ MQTT READY
-            // ----------------------------------------------------
-
             if (!_connection.IsReady)
             {
                 await Task.Delay(500, cancellationToken);
-
                 continue;
             }
 
-            // ----------------------------------------------------
-            // Kiểm tra Database API định kỳ
-            // ----------------------------------------------------
-
+            // Kiểm tra Redis định kỳ
             await _publishSignal.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken);
 
             await PrepareDatabaseTopicsAsync(cancellationToken);
 
-            // ----------------------------------------------------
             // Xử lý pending MQTT publish
-            // ----------------------------------------------------
-
             await ProcessPendingAsync(cancellationToken);
         }
     }
@@ -215,7 +172,6 @@ public sealed class MqttPublishManager : BackgroundService
                 );
 
                 RemovePending(pending.Topic);
-
                 continue;
             }
 
@@ -242,34 +198,46 @@ public sealed class MqttPublishManager : BackgroundService
             if (pending.Payload == null)
             {
                 RemovePending(pending.Topic);
-
                 continue;
             }
 
             // ----------------------------------------------------
-            // Publish
+            // PUBLISH
+            // ----------------------------------------------------
+            //
+            // Chỉ publish một lần cho mỗi PendingPublish.
+            //
+            // Nếu MQTT đã publish thành công nhưng callback Redis
+            // thất bại, vòng lặp tiếp theo chỉ retry callback,
+            // không gửi lại payload MQTT.
             // ----------------------------------------------------
 
-            MqttPublishRequest request = new() { Topic = pending.Topic, Payload = pending.Payload };
-
-            bool success = await _publisher.PublishAsync(request, cancellationToken);
-
-            // ----------------------------------------------------
-            // Publish thất bại
-            // ----------------------------------------------------
-
-            if (!success)
+            if (!pending.Published)
             {
-                await HandlePublishFailureAsync(pending, cancellationToken);
+                MqttPublishRequest request = new()
+                {
+                    Topic = pending.Topic,
+                    Payload = pending.Payload,
+                };
 
-                return;
+                bool success = await _publisher.PublishAsync(request, cancellationToken);
+
+                // Publish thất bại
+                if (!success)
+                {
+                    await HandlePublishFailureAsync(pending, cancellationToken);
+
+                    return;
+                }
+
+                // Publish thành công: ghi nhớ trạng thái trong RAM.
+                pending.Published = true;
+                pending.ConsecutiveFailures = 0;
             }
 
             // ----------------------------------------------------
-            // Publish thành công
+            // CALLBACK XÁC NHẬN
             // ----------------------------------------------------
-
-            pending.ConsecutiveFailures = 0;
 
             bool callbackSuccess = true;
 
@@ -282,17 +250,11 @@ public sealed class MqttPublishManager : BackgroundService
             // Callback thất bại
             // ----------------------------------------------------
 
-            // Ví dụ:
-            // MQTT publish thành công nhưng Database API
-            // mark-sent thất bại.
-            //
-            // Giữ nguyên pending để không mất batch.
-
             if (!callbackSuccess)
             {
                 _logger.LogWarning(
                     "MQTT {Topic} published, but success callback failed. "
-                        + "Keeping pending batch.",
+                        + "Keeping pending batch without republishing.",
                     pending.Topic
                 );
 
@@ -301,20 +263,17 @@ public sealed class MqttPublishManager : BackgroundService
                 return;
             }
 
-            _logger.LogInformation("MQTT {Topic} published successfully.", pending.Topic);
+            _logger.LogInformation(
+                "MQTT {Topic} published and acknowledged successfully.",
+                pending.Topic
+            );
 
             RemovePending(pending.Topic);
 
-            // ----------------------------------------------------
-            // Lấy batch tiếp theo từ Database API
-            // ----------------------------------------------------
-
+            // Lấy batch tiếp theo từ Redis
             await PrepareDatabaseTopicsAsync(cancellationToken);
 
-            // ----------------------------------------------------
             // Delay trước batch tiếp theo
-            // ----------------------------------------------------
-
             if (HasPending())
             {
                 await Task.Delay(PublishDelayMilliseconds, cancellationToken);
@@ -340,11 +299,7 @@ public sealed class MqttPublishManager : BackgroundService
             MaxPublishFailures
         );
 
-        // --------------------------------------------------------
-        // Chưa đủ 5 lần:
-        // giữ nguyên payload để retry.
-        // --------------------------------------------------------
-
+        // Chưa đủ 5 lần: giữ nguyên payload để retry.
         if (pending.ConsecutiveFailures < MaxPublishFailures)
         {
             await Task.Delay(PublishDelayMilliseconds, cancellationToken);
@@ -352,13 +307,8 @@ public sealed class MqttPublishManager : BackgroundService
             return;
         }
 
-        // --------------------------------------------------------
-        // Đủ 5 lần:
-        // yêu cầu reconnect.
-        //
+        // Đủ 5 lần: yêu cầu reconnect.
         // Không xóa pending.
-        // --------------------------------------------------------
-
         pending.ConsecutiveFailures = 0;
 
         _logger.LogWarning(
@@ -384,21 +334,10 @@ public sealed class MqttPublishManager : BackgroundService
                 continue;
             }
 
-            // ----------------------------------------------------
-            // Topic chỉ lấy dữ liệu từ Database khi có
-            // PrepareAsync.
-            //
-            // Hiện tại Opera là topic duy nhất.
-            // ----------------------------------------------------
-
             if (definition.PrepareAsync == null)
             {
                 continue;
             }
-
-            // ----------------------------------------------------
-            // Đã có pending thì không load thêm.
-            // ----------------------------------------------------
 
             if (HasPending(topic))
             {
@@ -411,13 +350,10 @@ public sealed class MqttPublishManager : BackgroundService
                 Payload = null,
                 Data = null,
                 ConsecutiveFailures = 0,
+                Published = false,
             };
 
             await definition.PrepareAsync(pending, cancellationToken);
-
-            // ----------------------------------------------------
-            // Không có dữ liệu Database API.
-            // ----------------------------------------------------
 
             if (pending.Payload == null)
             {
@@ -447,10 +383,8 @@ public sealed class MqttPublishManager : BackgroundService
     {
         var data = new
         {
-            SaveIntervalMinutes = _settings.Database.SaveIntervalMinutes,
-
+            // SaveIntervalMinutes = _settings.Database.SaveIntervalMinutes,
             Ver = _settings.Device.Ver,
-
             Server = _connection.CurrentServerIp,
         };
 
@@ -460,7 +394,7 @@ public sealed class MqttPublishManager : BackgroundService
     }
 
     // ============================================================
-    // PREPARE OPERA
+    // PREPARE OPERA - READ FROM REDIS STREAM
     // ============================================================
 
     private async Task PrepareOperaAsync(
@@ -473,44 +407,109 @@ public sealed class MqttPublishManager : BackgroundService
             return;
         }
 
-        // --------------------------------------------------------
-        // Gọi Database API
-        //
-        // GET /api/mqtt/pending?maxMessages=10
-        // --------------------------------------------------------
-
         try
         {
-            string url = $"api/mqtt/pending?maxMessages={DatabaseBatchSize}";
+            cancellationToken.ThrowIfCancellationRequested();
 
-            List<StationMessageDto>? messages = await _databaseApi.GetFromJsonAsync<
-                List<StationMessageDto>
-            >(url, cancellationToken);
+            // Đọc tối đa 10 entry từ Redis Stream.
+            // Mỗi entry phải có field "payload" chứa JSON StationMessageDto.
 
-            if (messages == null || messages.Count == 0)
+            StreamEntry[] entries = await _redis.StreamRangeAsync(
+                MqttStream,
+                minId: "-",
+                maxId: "+",
+                count: DatabaseBatchSize,
+                messageOrder: Order.Ascending
+            );
+
+            if (entries.Length == 0)
             {
-                _logger.LogDebug("MQTT Opera Database API check | " + "No pending messages.");
+                _logger.LogDebug("MQTT Opera Redis check | No pending messages.");
 
                 return;
             }
 
-            // ----------------------------------------------------
-            // Đóng gói payload Opera
-            //
-            // Không đưa:
-            // Id
-            // MqttSent
-            // FtpSent
-            // Ftp2Sent
-            //
-            // vào MQTT payload.
-            // ----------------------------------------------------
+            List<StationMessageDto> messages = new(entries.Length);
+            List<RedisMessageReference> references = new(entries.Length);
+
+            foreach (StreamEntry entry in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Tìm field payload trong Redis Stream entry.
+                RedisValue payloadValue = RedisValue.Null;
+
+                foreach (NameValueEntry field in entry.Values)
+                {
+                    if (field.Name == "payload")
+                    {
+                        payloadValue = field.Value;
+                        break;
+                    }
+                }
+
+                if (payloadValue.IsNullOrEmpty)
+                {
+                    _logger.LogWarning(
+                        "MQTT Opera Redis entry has no payload | EntryId={EntryId}",
+                        entry.Id
+                    );
+
+                    continue;
+                }
+
+                StationMessageDto? message;
+
+                try
+                {
+                    message = JsonSerializer.Deserialize<StationMessageDto>(
+                        payloadValue.ToString()
+                    );
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "MQTT Opera Redis payload is invalid | EntryId={EntryId}",
+                        entry.Id
+                    );
+
+                    continue;
+                }
+
+                if (message == null || message.Id <= 0)
+                {
+                    _logger.LogWarning(
+                        "MQTT Opera Redis message is invalid | EntryId={EntryId}",
+                        entry.Id
+                    );
+
+                    continue;
+                }
+
+                messages.Add(message);
+
+                references.Add(
+                    new RedisMessageReference
+                    {
+                        EntryId = entry.Id.ToString(),
+                        MessageId = message.Id,
+                    }
+                );
+            }
+
+            if (messages.Count == 0)
+            {
+                return;
+            }
+
+            // Giữ nguyên cấu trúc JSON Opera cũ.
+            // Không đưa MessageId vào payload MQTT.
 
             var data = messages
                 .Select(message => new
                 {
                     StationName = message.StationName,
-
                     Timestamp = message.Timestamp,
 
                     Measurements = message
@@ -527,20 +526,15 @@ public sealed class MqttPublishManager : BackgroundService
 
             pending.Payload = JsonSerializer.Serialize(data);
 
-            // ----------------------------------------------------
-            // Lưu Id của batch
-            //
-            // Sau khi MQTT publish thành công,
-            // gọi POST /api/mqtt/mark-sent
-            // ----------------------------------------------------
-
-            pending.Data = messages.Select(message => message.Id).ToList();
+            // Lưu tham chiếu Redis để xóa entry sau khi publish thành công.
+            pending.Data = references;
 
             _logger.LogDebug(
-                "MQTT Opera prepared from Database API | "
-                    + "BatchSize={BatchSize} | Stations={Stations}",
+                "MQTT Opera prepared from Redis Stream | "
+                    + "BatchSize={BatchSize} | Stations={Stations} | EntryIds={EntryIds}",
                 messages.Count,
-                string.Join(", ", messages.Select(x => x.StationName))
+                string.Join(", ", messages.Select(x => x.StationName)),
+                string.Join(", ", references.Select(x => x.EntryId))
             );
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -549,10 +543,7 @@ public sealed class MqttPublishManager : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Database API pending request failed.");
-
-            // Không tạo payload.
-            // Lần sau sẽ gọi lại API.
+            _logger.LogWarning(ex, "MQTT Opera Redis read failed.");
         }
     }
 
@@ -560,11 +551,7 @@ public sealed class MqttPublishManager : BackgroundService
     // PREPARE sCoFi
     // ============================================================
 
-    private void PrepareSCoFi(PendingPublish pending)
-    {
-        // Nếu sCoFi được Request() với payload
-        // thì pending.Payload đã có sẵn.
-    }
+    private void PrepareSCoFi(PendingPublish pending) { }
 
     // ============================================================
     // SUCCESS CALLBACK - MePDV
@@ -580,63 +567,81 @@ public sealed class MqttPublishManager : BackgroundService
 
     // ============================================================
     // SUCCESS CALLBACK - OPERA
+    // ACKNOWLEDGE AND DELETE FROM REDIS
     // ============================================================
+
+    private const string MarkOperaSentScript = """
+        local stream = KEYS[1]
+
+        local statusPrefix = 'database:status:mqtt:'
+        local dedupPrefix = 'database:dedup:mqtt:'
+        local processed = 0
+
+        for i = 1, #ARGV, 2 do
+            local entryId = ARGV[i]
+            local messageId = ARGV[i + 1]
+
+            -- XDEL trả về 0 nếu entry không còn tồn tại.
+            -- Trường hợp này vẫn được xem là đã xử lý.
+            --
+            -- DEL cũng hợp lệ khi dedup key không tồn tại.
+            -- Đặt status sau khi hai lệnh trên chạy thành công.
+
+            redis.call('XDEL', stream, entryId)
+            redis.call('DEL', dedupPrefix .. messageId)
+            redis.call('SET', statusPrefix .. messageId, '1')
+
+            -- Chỉ cần các lệnh Redis thực thi không lỗi thì
+            -- được tính là xử lý thành công, kể cả khi entry
+            -- hoặc dedup key đã không còn tồn tại.
+
+            processed = processed + 1
+        end
+
+        return processed
+        """;
 
     private async Task<bool> OnOperaSuccessAsync(
         PendingPublish pending,
         CancellationToken cancellationToken
     )
     {
-        if (pending.Data is not List<long> messageIds || messageIds.Count == 0)
+        if (pending.Data is not List<RedisMessageReference> references || references.Count == 0)
         {
             return true;
         }
 
-        // --------------------------------------------------------
-        // MQTT publish thành công.
-        //
-        // Gọi Database API:
-        //
-        // POST /api/mqtt/mark-sent
-        //
-        // Body:
-        //
-        // {
-        //     "Ids": [101, 102, 103]
-        // }
-        // --------------------------------------------------------
-
         try
         {
-            MarkMessagesSentRequest request = new() { Ids = messageIds };
+            cancellationToken.ThrowIfCancellationRequested();
 
-            HttpResponseMessage response = await _databaseApi.PostAsJsonAsync(
-                "api/mqtt/mark-sent",
-                request,
-                cancellationToken
+            // Truyền từng cặp EntryId và MessageId vào Lua.
+            // Lua thực hiện xóa Stream, xóa dedup và tạo status
+            // trong một thao tác nguyên tử trên Redis.
+
+            RedisValue[] args = references
+                .SelectMany(reference =>
+                    new RedisValue[] { reference.EntryId, reference.MessageId.ToString() }
+                )
+                .ToArray();
+
+            RedisResult result = await _redis.ScriptEvaluateAsync(
+                MarkOperaSentScript,
+                new RedisKey[] { MqttStream },
+                args
             );
 
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "Database API mark-sent failed | "
-                        + "StatusCode={StatusCode} | "
-                        + "MessageIds={MessageIds}",
-                    (int)response.StatusCode,
-                    string.Join(", ", messageIds)
-                );
-
-                return false;
-            }
+            long processed = (long)result;
 
             _logger.LogInformation(
-                "MQTT Opera Database API batch marked as sent | "
-                    + "Count={Count} | MessageIds={MessageIds}",
-                messageIds.Count,
-                string.Join(", ", messageIds)
+                "MQTT Opera Redis batch marked as sent | "
+                    + "Count={Count} | Processed={Processed} | MessageIds={MessageIds}",
+                references.Count,
+                processed,
+                string.Join(", ", references.Select(x => x.MessageId))
             );
 
-            return true;
+            return processed == references.Count;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -646,8 +651,8 @@ public sealed class MqttPublishManager : BackgroundService
         {
             _logger.LogWarning(
                 ex,
-                "Database API mark-sent request failed | " + "MessageIds={MessageIds}",
-                string.Join(", ", messageIds)
+                "MQTT Opera Redis acknowledgement failed | MessageIds={MessageIds}",
+                string.Join(", ", references.Select(x => x.MessageId))
             );
 
             return false;
@@ -731,17 +736,6 @@ public sealed class MqttPublishManager : BackgroundService
     }
 
     // ============================================================
-    // DISPOSE
-    // ============================================================
-
-    public override void Dispose()
-    {
-        _publishSignal.Dispose();
-
-        base.Dispose();
-    }
-
-    // ============================================================
     // INNER TYPES
     // ============================================================
 
@@ -751,11 +745,14 @@ public sealed class MqttPublishManager : BackgroundService
 
         public string? Payload { get; set; }
 
-        // Opera:
-        // Danh sách Id của batch.
+        // Opera: danh sách tham chiếu tới entry Redis đã đọc.
         public object? Data { get; set; }
 
         public int ConsecutiveFailures { get; set; }
+
+        // MQTT publish đã thành công.
+        // Retry callback không được publish lại payload.
+        public bool Published { get; set; }
     }
 
     private sealed class PublishDefinition
@@ -768,7 +765,18 @@ public sealed class MqttPublishManager : BackgroundService
     }
 
     // ============================================================
-    // DATABASE API DTO
+    // REDIS MESSAGE REFERENCE
+    // ============================================================
+
+    private sealed class RedisMessageReference
+    {
+        public string EntryId { get; set; } = string.Empty;
+
+        public long MessageId { get; set; }
+    }
+
+    // ============================================================
+    // DATABASE MESSAGE DTO
     // ============================================================
 
     private sealed class StationMessageDto
@@ -803,10 +811,5 @@ public sealed class MqttPublishManager : BackgroundService
         public int Status { get; set; }
 
         public string Timestamp { get; set; } = "";
-    }
-
-    private sealed class MarkMessagesSentRequest
-    {
-        public List<long> Ids { get; set; } = new();
     }
 }

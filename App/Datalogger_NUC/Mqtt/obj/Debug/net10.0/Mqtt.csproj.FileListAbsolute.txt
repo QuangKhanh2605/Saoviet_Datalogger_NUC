@@ -30,3 +30,6 @@ D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\staticwebassets.development.json
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\staticwebassets.build.endpoints.json
 D:\Datalogger_NUC\Mqtt\obj\Debug\net10.0\swae.build.ex.cache
 D:\datalogger_NUC\mqtt\bin\Debug\net10.0\RuntimeData\MqttConfig.json
+D:\Datalogger_NUC\mqtt\bin\Debug\net10.0\RESPite.dll
+D:\Datalogger_NUC\mqtt\bin\Debug\net10.0\StackExchange.Redis.dll
+D:\Datalogger_NUC\mqtt\bin\Debug\net10.0\System.IO.Hashing.dll

@@ -1,0 +1,8 @@
+{
+    "Web": {
+        "Port": 5000
+    },
+    "Sensor": {
+        "ReadIntervalSeconds": 3
+    }
+}

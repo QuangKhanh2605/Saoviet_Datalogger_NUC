@@ -11,22 +11,8 @@ public static class StatusCode
 
 public static class StatusRuleEvaluator
 {
-    /// <summary>
-    /// Đánh giá status khi parameter đã đọc thành công.
-    ///
-    /// Có rule:
-    ///     rawValue match rule -> status theo rule
-    ///     không match          -> fallback "*"
-    ///     không có fallback    -> Error
-    ///
-    /// Không có rule:
-    ///     Connected/Read OK -> OK
-    /// </summary>
     public static int Evaluate(int rawValue, Dictionary<string, string>? rules)
     {
-        // Không có rule:
-        // parameter đã đọc thành công
-        // nên mặc định OK.
         if (rules == null || rules.Count == 0)
         {
             return StatusCode.Ok;
@@ -59,37 +45,6 @@ public static class StatusRuleEvaluator
         };
     }
 
-    /// <summary>
-    /// Đánh giá status có xét connection.
-    ///
-    /// Connection false:
-    ///     ERROR.
-    ///
-    /// Connection true:
-    ///     đánh giá Rule.
-    ///
-    /// Hàm này được giữ để các thành phần khác
-    /// có thể sử dụng nếu cần.
-    /// </summary>
-    public static int EvaluateConnection(
-        bool connected,
-        int rawValue,
-        Dictionary<string, string>? rules
-    )
-    {
-        if (!connected)
-        {
-            return StatusCode.Error;
-        }
-
-        return Evaluate(rawValue, rules);
-    }
-
-    /// <summary>
-    /// Kết hợp nhiều status.
-    ///
-    /// ERROR > CALIBRATING > OK
-    /// </summary>
     public static int Combine(IEnumerable<int> statusCodes)
     {
         bool anyError = false;

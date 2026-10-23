@@ -1,444 +1,693 @@
+using System.IO.Ports;
 using System.Text.Json;
 using Modbus.Sensors;
 
 namespace Modbus.Configuration;
 
-public class StationConfigurationService
+public sealed class StationConfigurationService
 {
     private readonly string _directoryPath;
+    private readonly string _filePath;
+    private readonly object _fileLock = new();
 
-    public StationConfigurationService(string directoryPath)
+    private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        _directoryPath = directoryPath;
+        PropertyNameCaseInsensitive = true,
+    };
+
+    public StationConfigurationService(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("Đường dẫn station không được để trống.", nameof(path));
+
+        if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            _filePath = Path.GetFullPath(path);
+            _directoryPath =
+                Path.GetDirectoryName(_filePath)
+                ?? throw new ArgumentException("Đường dẫn file không hợp lệ.", nameof(path));
+        }
+        else
+        {
+            _directoryPath = Path.GetFullPath(path);
+            _filePath = Path.Combine(_directoryPath, "station.json");
+        }
     }
 
-    public List<StationDefinition> LoadAll()
+    // ============================================================
+    // READ RAW JSON
+    // ============================================================
+
+    public string ReadRaw()
     {
-        if (!Directory.Exists(_directoryPath))
-            throw new DirectoryNotFoundException(
-                $"Không tìm thấy thư mục station: {_directoryPath}"
-            );
-
-        string[] files = Directory.GetFiles(
-            _directoryPath,
-            "*.json",
-            SearchOption.TopDirectoryOnly
-        );
-
-        if (files.Length == 0)
-            throw new FileNotFoundException($"Không tìm thấy file JSON trong: {_directoryPath}");
-
-        if (files.Length > 1)
-            throw new InvalidOperationException(
-                $"Thư mục station phải chứa đúng 1 file JSON. "
-                    + $"Tìm thấy: {string.Join(", ", files.Select(Path.GetFileName))}"
-            );
-
-        string file = files[0];
-
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-
-        StationConfiguration configuration;
-
-        try
+        lock (_fileLock)
         {
-            string json = File.ReadAllText(file);
+            if (!File.Exists(_filePath))
+            {
+                throw new FileNotFoundException("Không tìm thấy station.json.", _filePath);
+            }
 
-            configuration =
-                JsonSerializer.Deserialize<StationConfiguration>(json, options)
-                ?? throw new Exception("Deserialize trả về null.");
+            return File.ReadAllText(_filePath);
         }
-        catch (JsonException ex)
+    }
+
+    // ============================================================
+    // SAVE RAW JSON
+    // Chỉ ghi đè file gốc sau khi JSON và cấu hình đã hợp lệ.
+    // ============================================================
+
+    public void SaveRaw(string json)
+    {
+        ValidateRaw(json);
+
+        lock (_fileLock)
         {
-            throw new Exception($"JSON station configuration không hợp lệ: {ex.Message}", ex);
-        }
+            Directory.CreateDirectory(_directoryPath);
 
-        if (configuration.Stations == null)
-            throw new Exception("Station configuration không có 'Stations'.");
+            string tempPath = _filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
-        List<StationDefinition> stations = new();
-
-        foreach (StationDefinition station in configuration.Stations)
-        {
             try
             {
-                if (!station.Enabled)
-                {
-                    Console.WriteLine($"Bỏ qua station disabled: {station.StationName}");
+                File.WriteAllText(tempPath, json);
 
-                    continue;
-                }
-
-                ValidateStation(file, station);
-                stations.Add(station);
-
-                Console.WriteLine($"Station configuration OK: Station={station.StationName}");
+                File.Move(tempPath, _filePath, overwrite: true);
             }
-            catch (Exception ex)
+            finally
             {
-                Console.WriteLine($"[ERROR] Bỏ qua station '{station.StationName}': {ex.Message}");
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
             }
         }
+    }
 
-        stations = ValidateSharedConnections(stations);
+    public List<StationDefinition> ParseRaw(string json)
+    {
+        using JsonDocument document = JsonDocument.Parse(json);
 
-        Console.WriteLine(
-            $"Load station hoàn tất. "
-                + $"ValidStations={stations.Count} "
-                + $"TotalStations={configuration.Stations.Count}"
-        );
+        List<StationDefinition> stations;
+
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            stations =
+                JsonSerializer.Deserialize<List<StationDefinition>>(json, JsonOptions) ?? new();
+        }
+        else if (document.RootElement.ValueKind == JsonValueKind.Object)
+        {
+            // Hỗ trợ format cũ có wrapper Stations.
+            if (TryGetStationsElement(document.RootElement, out JsonElement stationsElement))
+            {
+                stations =
+                    JsonSerializer.Deserialize<List<StationDefinition>>(
+                        stationsElement.GetRawText(),
+                        JsonOptions
+                    ) ?? new();
+            }
+            else
+            {
+                StationDefinition? station = JsonSerializer.Deserialize<StationDefinition>(
+                    json,
+                    JsonOptions
+                );
+
+                stations = station is null ? new() : new() { station };
+            }
+        }
+        else
+        {
+            throw new InvalidDataException(
+                "station.json phải là object, array hoặc object chứa Stations."
+            );
+        }
+
+        if (stations.Count == 0)
+            throw new InvalidDataException("station.json không có station nào.");
+
+        HashSet<string> stationNames = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (StationDefinition? station in stations)
+        {
+            if (station is null)
+                throw new InvalidDataException("station.json chứa station null.");
+
+            if (string.IsNullOrWhiteSpace(station.StationName))
+                throw new InvalidDataException("StationName chưa được cấu hình.");
+
+            if (!stationNames.Add(station.StationName.Trim()))
+            {
+                throw new InvalidDataException($"StationName bị trùng: {station.StationName}.");
+            }
+
+            // Kiểm tra cả station disabled để không lưu cấu hình sai.
+            ValidateStation(_filePath, station);
+        }
 
         return stations;
     }
 
+    public void ValidateRaw(string json)
+    {
+        _ = ParseRaw(json);
+    }
+
+    private static bool TryGetStationsElement(JsonElement root, out JsonElement stationsElement)
+    {
+        foreach (JsonProperty property in root.EnumerateObject())
+        {
+            if (property.Name.Equals("Stations", StringComparison.OrdinalIgnoreCase))
+            {
+                stationsElement = property.Value;
+
+                if (stationsElement.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidDataException("Thuộc tính Stations phải là một array.");
+                }
+
+                return true;
+            }
+        }
+
+        stationsElement = default;
+        return false;
+    }
+
+    // ============================================================
+    // LOAD ALL ENABLED STATIONS
+    // ============================================================
+
+    public List<StationDefinition> LoadAll()
+    {
+        string json = ReadRaw();
+        List<StationDefinition> stations = ParseRaw(json);
+
+        List<StationDefinition> enabledStations = stations
+            .Where(station => station.Enabled)
+            .ToList();
+
+        foreach (StationDefinition station in stations)
+        {
+            if (!station.Enabled)
+            {
+                Console.WriteLine($"Bỏ qua station disabled: {station.StationName}");
+            }
+            else
+            {
+                Console.WriteLine($"Station OK: {station.StationName}");
+            }
+        }
+
+        Console.WriteLine(
+            $"Load station hoàn tất. "
+                + $"ValidStations={enabledStations.Count} "
+                + $"TotalStations={stations.Count}"
+        );
+
+        return enabledStations;
+    }
+
+    // ============================================================
+    // VALIDATE STATION
+    // ============================================================
+
     private static void ValidateStation(string file, StationDefinition station)
     {
         if (string.IsNullOrWhiteSpace(station.StationName))
-            throw new Exception("StationName chưa được cấu hình.");
+            throw new InvalidDataException("StationName chưa được cấu hình.");
 
-        ConnectionDefinition connection =
-            station.Connection
-            ?? throw new Exception($"Station '{station.StationName}' chưa có Connection.");
+        if (station.Connections is null || station.Connections.Count == 0)
+        {
+            throw new InvalidDataException(
+                $"Station '{station.StationName}' không có Connections."
+            );
+        }
 
-        if (
-            string.IsNullOrWhiteSpace(connection.PortName)
-            && string.IsNullOrWhiteSpace(connection.IpAddress)
-        )
-            throw new Exception($"Station '{station.StationName}' chưa có PortName/IpAddress.");
+        HashSet<string> connectionKeys = new(StringComparer.OrdinalIgnoreCase);
 
+        foreach (StationConnectionDefinition? stationConnection in station.Connections)
+        {
+            if (stationConnection is null)
+            {
+                throw new InvalidDataException(
+                    $"Station '{station.StationName}' có Connection null."
+                );
+            }
+
+            ConnectionDefinition? connection = stationConnection.Connection;
+
+            if (connection is null)
+            {
+                throw new InvalidDataException(
+                    $"Station '{station.StationName}' chưa có Connection."
+                );
+            }
+
+            ValidateConnection(file, station, connection);
+
+            string connectionKey = GetConnectionKey(connection);
+
+            if (!connectionKeys.Add(connectionKey))
+            {
+                throw new InvalidDataException(
+                    $"Station '{station.StationName}' " + $"Connection '{connectionKey}' bị trùng."
+                );
+            }
+
+            if (stationConnection.Sensors is null || stationConnection.Sensors.Count == 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' "
+                        + $"Connection='{connectionKey}' không có Sensors."
+                );
+            }
+
+            HashSet<byte> slaveIds = new();
+
+            foreach (SlaveDefinition? slave in stationConnection.Sensors)
+            {
+                if (slave is null)
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' có Sensor null."
+                    );
+                }
+
+                if (!slaveIds.Add(slave.SlaveId))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' "
+                            + $"Connection='{connectionKey}' "
+                            + $"SlaveId={slave.SlaveId} bị trùng."
+                    );
+                }
+
+                ValidateSlave(file, station, stationConnection, slave);
+            }
+
+            ValidateWrites(file, station, stationConnection);
+        }
+    }
+
+    // ============================================================
+    // VALIDATE CONNECTION
+    // ============================================================
+
+    private static void ValidateConnection(
+        string file,
+        StationDefinition station,
+        ConnectionDefinition connection
+    )
+    {
         if (string.IsNullOrWhiteSpace(connection.Protocol))
-            throw new Exception($"Station '{station.StationName}' chưa có Protocol.");
-
-        if (
-            !connection.Protocol.Equals("ModbusRtu", StringComparison.OrdinalIgnoreCase)
-            && !connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase)
-        )
-            throw new Exception(
-                $"Station '{station.StationName}' có Protocol không hỗ trợ: "
-                    + $"{connection.Protocol}"
-            );
-
-        if (station.Sensors == null || station.Sensors.Count == 0)
-            throw new Exception($"Station '{station.StationName}' không có Sensors.");
-
-        foreach (SlaveDefinition slave in station.Sensors)
-            ValidateSlave(file, slave);
-
-        ValidateStationWrites(file, station);
-    }
-
-    private static void ValidateSlave(string file, SlaveDefinition slave)
-    {
-        if (slave.Blocks == null || slave.Blocks.Count == 0)
-            throw new Exception($"File '{file}': SlaveId={slave.SlaveId} không có Blocks.");
-
-        foreach (RegisterBlockDefinition block in slave.Blocks)
-            ValidateBlock(file, slave, block);
-
-        ValidateParameterNames(file, slave);
-        ValidateStatusReferences(file, slave);
-
-        if (slave.Write == null)
-            return;
-
-        foreach (WriteDefinition write in slave.Write)
-            ValidateWriteStructure(file, slave, write);
-    }
-
-    private static void ValidateParameterNames(string file, SlaveDefinition slave)
-    {
-        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (RegisterBlockDefinition block in slave.Blocks)
         {
-            foreach (ParameterDefinition parameter in block.Parameters)
+            throw new InvalidDataException($"Station='{station.StationName}' chưa có Protocol.");
+        }
+
+        bool rtu = connection.Protocol.Equals("ModbusRtu", StringComparison.OrdinalIgnoreCase);
+
+        bool tcp = connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase);
+
+        if (!rtu && !tcp)
+        {
+            throw new InvalidDataException(
+                $"Station='{station.StationName}' "
+                    + $"Protocol không hỗ trợ: {connection.Protocol}"
+            );
+        }
+
+        if (rtu)
+        {
+            if (string.IsNullOrWhiteSpace(connection.PortName))
             {
-                if (!names.Add(parameter.Name))
-                    throw new Exception(
-                        $"File '{file}': SlaveId={slave.SlaveId} "
-                            + $"Parameter '{parameter.Name}' bị trùng."
-                    );
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' ModbusRtu chưa có PortName."
+                );
+            }
+
+            if (connection.BaudRate <= 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' BaudRate phải > 0."
+                );
+            }
+
+            if (connection.DataBits <= 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' DataBits phải > 0."
+                );
+            }
+
+            if (
+                !Enum.TryParse(connection.Parity, true, out Parity parity)
+                || !Enum.IsDefined(parity)
+            )
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Parity không hợp lệ: "
+                        + $"{connection.Parity}"
+                );
+            }
+
+            if (
+                !Enum.TryParse(connection.StopBits, true, out StopBits stopBits)
+                || !Enum.IsDefined(stopBits)
+            )
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' StopBits không hợp lệ: "
+                        + $"{connection.StopBits}"
+                );
             }
         }
-    }
 
-    private static void ValidateStatusReferences(string file, SlaveDefinition slave)
-    {
-        HashSet<string> parameters = slave
-            .Blocks.SelectMany(block => block.Parameters)
-            .Select(parameter => parameter.Name)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (RegisterBlockDefinition block in slave.Blocks)
+        if (tcp)
         {
-            foreach (StatusDefinition status in block.Statuses)
+            if (string.IsNullOrWhiteSpace(connection.IpAddress))
             {
-                if (string.IsNullOrWhiteSpace(status.Parameter))
-                    throw new Exception(
-                        $"File '{file}': SlaveId={slave.SlaveId} "
-                            + $"Status Address={status.Address} chưa có Parameter."
-                    );
-
-                if (!parameters.Contains(status.Parameter))
-                    throw new Exception(
-                        $"File '{file}': SlaveId={slave.SlaveId} "
-                            + $"Status Address={status.Address} "
-                            + $"tham chiếu Parameter='{status.Parameter}' không tồn tại."
-                    );
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' ModbusTcp chưa có IpAddress."
+                );
             }
-        }
-    }
 
-    private static void ValidateBlock(
-        string file,
-        SlaveDefinition slave,
-        RegisterBlockDefinition block
-    )
-    {
-        if (block.Quantity <= 0)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Block {block.StartAddress}: Quantity phải > 0."
-            );
-
-        if (block.Function <= 0)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Block {block.StartAddress}: Function không hợp lệ."
-            );
-
-        if (block.Parameters == null)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Block {block.StartAddress}: Parameters bị null."
-            );
-
-        if (block.Statuses == null)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Block {block.StartAddress}: Statuses bị null."
-            );
-
-        foreach (ParameterDefinition parameter in block.Parameters)
-            ValidateParameter(file, slave, parameter);
-
-        foreach (StatusDefinition status in block.Statuses)
-            ValidateStatus(file, slave, block, status);
-    }
-
-    private static void ValidateParameter(
-        string file,
-        SlaveDefinition slave,
-        ParameterDefinition parameter
-    )
-    {
-        if (string.IsNullOrWhiteSpace(parameter.Name))
-            throw new Exception($"File '{file}': SlaveId={slave.SlaveId} Parameter không có Name.");
-
-        if (parameter.Read == null)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Parameter='{parameter.Name}' không có Read."
-            );
-
-        if (parameter.Read.Length <= 0)
-            throw new Exception(
-                $"File '{file}': Parameter='{parameter.Name}' " + $"Read.Length phải > 0."
-            );
-
-        ValidateBitField(
-            file,
-            $"Parameter='{parameter.Name}'",
-            parameter.Read.Length,
-            parameter.Read.BitPosition,
-            parameter.Read.BitLength
-        );
-    }
-
-    private static void ValidateStatus(
-        string file,
-        SlaveDefinition slave,
-        RegisterBlockDefinition block,
-        StatusDefinition status
-    )
-    {
-        if (string.IsNullOrWhiteSpace(status.Parameter))
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Status Address={status.Address} chưa có Parameter."
-            );
-
-        if (status.Length <= 0)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Status Address={status.Address} Length phải > 0."
-            );
-
-        ValidateBitField(
-            file,
-            $"Status Address={status.Address}",
-            status.Length,
-            status.BitPosition,
-            status.BitLength
-        );
-    }
-
-    private static void ValidateBitField(
-        string file,
-        string target,
-        int length,
-        int? bitPosition,
-        int? bitLength
-    )
-    {
-        if (bitPosition.HasValue != bitLength.HasValue)
-            throw new Exception(
-                $"File '{file}': {target} " + "phải khai báo đồng thời BitPosition và BitLength."
-            );
-
-        if (!bitPosition.HasValue)
-            return;
-
-        if (bitPosition.Value < 0)
-            throw new Exception($"File '{file}': {target} BitPosition không được < 0.");
-
-        if (bitLength!.Value <= 0 || bitLength.Value > 64)
-            throw new Exception($"File '{file}': {target} BitLength phải từ 1 đến 64.");
-
-        if (bitPosition.Value + bitLength.Value > length * 16)
-            throw new Exception($"File '{file}': {target} Bit field vượt quá Length.");
-    }
-
-    private static void ValidateWriteStructure(
-        string file,
-        SlaveDefinition slave,
-        WriteDefinition write
-    )
-    {
-        if (write.Source == null)
-            throw new Exception($"File '{file}': SlaveId={slave.SlaveId} Write.Source bị null.");
-
-        if (string.IsNullOrWhiteSpace(write.Source.Parameter))
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + "Write.Source.Parameter chưa được cấu hình."
-            );
-
-        if (write.Length <= 0)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Write Address={write.Address} Length phải > 0."
-            );
-
-        if (write.Function <= 0)
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Write Address={write.Address} Function không hợp lệ."
-            );
-
-        if (string.IsNullOrWhiteSpace(write.Type))
-            throw new Exception(
-                $"File '{file}': SlaveId={slave.SlaveId} "
-                    + $"Write Address={write.Address} Type chưa được cấu hình."
-            );
-    }
-
-    private static void ValidateStationWrites(string file, StationDefinition station)
-    {
-        HashSet<string> parameters = station
-            .Sensors.SelectMany(slave => slave.Blocks)
-            .SelectMany(block => block.Parameters)
-            .Select(parameter => parameter.Name)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (SlaveDefinition slave in station.Sensors)
-        {
-            if (slave.Write == null)
-                continue;
-
-            foreach (WriteDefinition write in slave.Write)
+            if (connection.Port <= 0 || connection.Port > 65535)
             {
-                string source = write.Source.Parameter;
-
-                if (!parameters.Contains(source))
-                    throw new Exception(
-                        $"File '{file}': Station='{station.StationName}' "
-                            + $"Write Address={write.Address} "
-                            + $"Source.Parameter='{source}' không tồn tại."
-                    );
-
-                Console.WriteLine(
-                    $"Write source OK | Station={station.StationName} "
-                        + $"| WriteSlave={slave.SlaveId} "
-                        + $"| WriteAddress={write.Address} "
-                        + $"| Source={source}"
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' "
+                        + $"TCP Port không hợp lệ: {connection.Port}"
                 );
             }
         }
     }
 
-    private static List<StationDefinition> ValidateSharedConnections(
-        List<StationDefinition> stations
+    // ============================================================
+    // VALIDATE SLAVE / BLOCK / PARAMETER / STATUS / WRITE
+    // ============================================================
+
+    private static void ValidateSlave(
+        string file,
+        StationDefinition station,
+        StationConnectionDefinition stationConnection,
+        SlaveDefinition slave
     )
     {
-        List<StationDefinition> valid = new();
-
-        foreach (
-            var group in stations.GroupBy(
-                s => GetConnectionKey(s.Connection),
-                StringComparer.OrdinalIgnoreCase
-            )
-        )
+        if (slave.Blocks is null || slave.Blocks.Count == 0)
         {
-            StationDefinition reference = group.First();
+            throw new InvalidDataException(
+                $"Station='{station.StationName}' " + $"Slave={slave.SlaveId} không có Blocks."
+            );
+        }
 
-            valid.Add(reference);
+        HashSet<string> parameterNames = new(StringComparer.OrdinalIgnoreCase);
 
-            foreach (StationDefinition station in group.Skip(1))
+        foreach (RegisterBlockDefinition? block in slave.Blocks)
+        {
+            if (block is null)
             {
-                if (IsSameConnection(reference.Connection, station.Connection))
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' " + $"Slave={slave.SlaveId} chứa Block null."
+                );
+            }
+
+            // Kiểm tra định dạng địa chỉ.
+            _ = block.StartAddressValue;
+
+            if (block.Quantity == 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Block={block.StartAddress} Quantity phải > 0."
+                );
+            }
+
+            if (block.Function == 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Block={block.StartAddress} Function không hợp lệ."
+                );
+            }
+
+            if (block.Parameters is null)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Block={block.StartAddress} Parameters null."
+                );
+            }
+
+            if (block.Statuses is null)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Block={block.StartAddress} Statuses null."
+                );
+            }
+
+            foreach (ParameterDefinition? parameter in block.Parameters)
+            {
+                if (parameter is null)
                 {
-                    valid.Add(station);
-                }
-                else
-                {
-                    Console.WriteLine(
-                        $"[ERROR] Bỏ qua station '{station.StationName}'. "
-                            + $"Connection không giống '{reference.StationName}'."
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + "chứa Parameter null."
                     );
                 }
+
+                if (string.IsNullOrWhiteSpace(parameter.Name))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + "Parameter không có Name."
+                    );
+                }
+
+                if (!parameterNames.Add(parameter.Name))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + $"Parameter='{parameter.Name}' bị trùng."
+                    );
+                }
+
+                if (parameter.Read is null)
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' "
+                            + $"Parameter='{parameter.Name}' không có Read."
+                    );
+                }
+
+                _ = parameter.Read.AddressValue;
+
+                if (parameter.Read.Length <= 0)
+                {
+                    throw new InvalidDataException(
+                        $"Parameter='{parameter.Name}' Read.Length phải > 0."
+                    );
+                }
+
+                ValidateBits(
+                    $"Parameter='{parameter.Name}'",
+                    parameter.Read.Length,
+                    parameter.Read.BitPosition,
+                    parameter.Read.BitLength
+                );
+            }
+
+            foreach (StatusDefinition? status in block.Statuses)
+            {
+                if (status is null)
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + "chứa Status null."
+                    );
+                }
+
+                _ = status.AddressValue;
+
+                if (string.IsNullOrWhiteSpace(status.Parameter))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + $"Status={status.Address} chưa có Parameter."
+                    );
+                }
+
+                if (!parameterNames.Contains(status.Parameter))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                            + $"Status={status.Address} tham chiếu Parameter="
+                            + $"'{status.Parameter}' không tồn tại."
+                    );
+                }
+
+                if (status.Length <= 0)
+                {
+                    throw new InvalidDataException($"Status={status.Address} Length phải > 0.");
+                }
+
+                ValidateBits(
+                    $"Status={status.Address}",
+                    status.Length,
+                    status.BitPosition,
+                    status.BitLength
+                );
             }
         }
 
-        return valid;
+        if (slave.Write is null)
+            return;
+
+        foreach (WriteDefinition? write in slave.Write)
+        {
+            if (write is null)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} " + "chứa Write null."
+                );
+            }
+
+            _ = write.AddressValue;
+
+            if (write.Source is null)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Write={write.Address} Source null."
+                );
+            }
+
+            if (string.IsNullOrWhiteSpace(write.Source.Parameter))
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + "Write.Source.Parameter chưa cấu hình."
+                );
+            }
+
+            if (write.Length <= 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Write={write.Address} Length phải > 0."
+                );
+            }
+
+            if (write.Function == 0)
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Write={write.Address} Function không hợp lệ."
+                );
+            }
+
+            if (string.IsNullOrWhiteSpace(write.Type))
+            {
+                throw new InvalidDataException(
+                    $"Station='{station.StationName}' Slave={slave.SlaveId} "
+                        + $"Write={write.Address} Type chưa cấu hình."
+                );
+            }
+        }
     }
 
-    private static bool IsSameConnection(ConnectionDefinition first, ConnectionDefinition second)
-    {
-        if (!string.Equals(first.Protocol, second.Protocol, StringComparison.OrdinalIgnoreCase))
-            return false;
+    // ============================================================
+    // VALIDATE WRITE SOURCE
+    // ============================================================
 
-        if (first.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase))
+    private static void ValidateWrites(
+        string file,
+        StationDefinition station,
+        StationConnectionDefinition stationConnection
+    )
+    {
+        HashSet<string> parameters = stationConnection
+            .Sensors.Where(s => s is not null)
+            .SelectMany(s => s.Blocks ?? new())
+            .Where(b => b is not null)
+            .SelectMany(b => b.Parameters ?? new())
+            .Where(p => p is not null && !string.IsNullOrWhiteSpace(p.Name))
+            .Select(p => p.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        string connectionKey = GetConnectionKey(stationConnection.Connection);
+
+        foreach (SlaveDefinition slave in stationConnection.Sensors)
         {
-            return string.Equals(
-                    first.IpAddress,
-                    second.IpAddress,
-                    StringComparison.OrdinalIgnoreCase
-                )
-                && first.Port == second.Port;
+            if (slave.Write is null)
+                continue;
+
+            foreach (WriteDefinition write in slave.Write)
+            {
+                string source = write.Source!.Parameter;
+
+                if (!parameters.Contains(source))
+                {
+                    throw new InvalidDataException(
+                        $"Station='{station.StationName}' "
+                            + $"Connection='{connectionKey}' "
+                            + $"Write={write.Address} "
+                            + $"Source.Parameter='{source}' không tồn tại."
+                    );
+                }
+
+                Console.WriteLine(
+                    $"Write OK | Station={station.StationName} | "
+                        + $"Connection={connectionKey} | Slave={slave.SlaveId} | "
+                        + $"Address={write.Address} | Source={source}"
+                );
+            }
+        }
+    }
+
+    // ============================================================
+    // VALIDATE BIT FIELD
+    // ============================================================
+
+    private static void ValidateBits(string target, int length, int? bitPosition, int? bitLength)
+    {
+        if (bitPosition.HasValue != bitLength.HasValue)
+        {
+            throw new InvalidDataException(
+                $"{target}: BitPosition và BitLength phải đi cùng nhau."
+            );
         }
 
-        return string.Equals(first.PortName, second.PortName, StringComparison.OrdinalIgnoreCase)
-            && first.BaudRate == second.BaudRate
-            && string.Equals(first.Parity, second.Parity, StringComparison.OrdinalIgnoreCase)
-            && first.DataBits == second.DataBits
-            && string.Equals(first.StopBits, second.StopBits, StringComparison.OrdinalIgnoreCase);
+        if (!bitPosition.HasValue)
+            return;
+
+        if (bitPosition.Value < 0)
+        {
+            throw new InvalidDataException($"{target}: BitPosition không được < 0.");
+        }
+
+        if (bitLength!.Value <= 0 || bitLength.Value > 64)
+        {
+            throw new InvalidDataException($"{target}: BitLength phải từ 1 đến 64.");
+        }
+
+        if (bitPosition.Value + bitLength.Value > length * 16)
+        {
+            throw new InvalidDataException($"{target}: Bit field vượt quá Length.");
+        }
     }
+
+    // ============================================================
+    // CONNECTION KEY
+    // ============================================================
 
     private static string GetConnectionKey(ConnectionDefinition connection)
     {
-        return connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase)
-            ? $"tcp:{connection.IpAddress}:{connection.Port}"
-            : $"rtu:{connection.PortName}";
+        if (connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"tcp:{connection.IpAddress}:{connection.Port}";
+        }
+
+        return $"rtu:{connection.PortName}:"
+            + $"{connection.BaudRate}:"
+            + $"{connection.Parity}:"
+            + $"{connection.DataBits}:"
+            + $"{connection.StopBits}";
     }
 }

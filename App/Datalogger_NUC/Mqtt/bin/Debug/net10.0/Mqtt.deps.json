@@ -8,7 +8,8 @@
     ".NETCoreApp,Version=v10.0": {
       "Mqtt/1.0.0": {
         "dependencies": {
-          "MQTTnet": "5.0.1.1416"
+          "MQTTnet": "5.0.1.1416",
+          "StackExchange.Redis": "3.3.1"
         },
         "runtime": {
           "Mqtt.dll": {}
@@ -19,6 +20,34 @@
           "lib/net8.0/MQTTnet.dll": {
             "assemblyVersion": "5.0.1.1416",
             "fileVersion": "5.0.1.1416"
+          }
+        }
+      },
+      "RESPite/3.3.1": {
+        "runtime": {
+          "lib/net10.0/RESPite.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.3.1.2706"
+          }
+        }
+      },
+      "StackExchange.Redis/3.3.1": {
+        "dependencies": {
+          "RESPite": "3.3.1",
+          "System.IO.Hashing": "10.0.12"
+        },
+        "runtime": {
+          "lib/net10.0/StackExchange.Redis.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.3.1.2706"
+          }
+        }
+      },
+      "System.IO.Hashing/10.0.12": {
+        "runtime": {
+          "lib/net10.0/System.IO.Hashing.dll": {
+            "assemblyVersion": "10.0.0.12",
+            "fileVersion": "10.0.1226.42308"
           }
         }
       }
@@ -36,6 +65,27 @@
       "sha512": "sha512-ONYieEMaHiIei5dAtHXywnfJGhmrd5Av5sNJSQERp6AtZdPk3xxjCR6Cv0C5RUr/XbLeHO4/HQ0Rc2bQ5NF5Mw==",
       "path": "mqttnet/5.0.1.1416",
       "hashPath": "mqttnet.5.0.1.1416.nupkg.sha512"
+    },
+    "RESPite/3.3.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-1Ky6rOjP9YjA8eXWWSJDTSRgVQiRXwsKnET+X5hDuONJqq8KbYLQrTUjMg8gsdyKzwj74ivEioTuQd4mVhthdQ==",
+      "path": "respite/3.3.1",
+      "hashPath": "respite.3.3.1.nupkg.sha512"
+    },
+    "StackExchange.Redis/3.3.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-AnA3ZuYnOQl2Hh/PXqV+JagA6QO8hiHovHBOc0PKz+uafVSsI0lYPQy8D0rklCC5Wpmc9MznEw+Lpt8e+LaB9w==",
+      "path": "stackexchange.redis/3.3.1",
+      "hashPath": "stackexchange.redis.3.3.1.nupkg.sha512"
+    },
+    "System.IO.Hashing/10.0.12": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jDix4bBMYnpZdSPcnY+KDV6ik3SRMzpMKby/bZl/XUwIiflwRNAFZ0oOl61R/pSaveIJ8t1gs2BUlrGsPs/bcg==",
+      "path": "system.io.hashing/10.0.12",
+      "hashPath": "system.io.hashing.10.0.12.nupkg.sha512"
     }
   }
 }

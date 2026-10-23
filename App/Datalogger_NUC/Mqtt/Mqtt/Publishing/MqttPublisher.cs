@@ -27,7 +27,6 @@ public sealed class MqttPublisher
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // Không có MQTT connection thì không publish
         if (!_connection.IsReady)
         {
             return false;
@@ -47,9 +46,6 @@ public sealed class MqttPublisher
         }
         catch
         {
-            // Chỉ báo publish thất bại.
-            // Việc đếm lỗi và quyết định reconnect/switch server
-            // nên nằm ở tầng quản lý publish/connection.
             return false;
         }
     }

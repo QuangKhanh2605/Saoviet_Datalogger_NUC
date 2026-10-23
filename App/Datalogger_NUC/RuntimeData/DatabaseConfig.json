@@ -7,7 +7,7 @@
     },
     "Database": {
         "SaveIntervalMinutes": 1,
-        "SaveSecond": 10,
+        "SaveSecond": 15,
         "RetentionDays": 30,
         "MaxDatabaseSizeMB": 10,
         "CleanupIntervalSeconds": 10,

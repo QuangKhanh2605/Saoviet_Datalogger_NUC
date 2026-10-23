@@ -2,8 +2,6 @@ namespace Ftp.Configuration;
 
 public class AppSettings
 {
-    public DeviceSettings Device { get; set; } = new();
-
     public DatabaseApiSettings DatabaseApi { get; set; } = new();
 
     public FtpSettings Ftp { get; set; } = new();

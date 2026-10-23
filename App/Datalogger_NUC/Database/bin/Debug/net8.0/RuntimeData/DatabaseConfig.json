@@ -1,0 +1,16 @@
+{
+    "Web": {
+        "Port": 5001
+    },
+    "ModbusApi": {
+        "BaseUrl": "http://localhost:5000"
+    },
+    "Database": {
+        "SaveIntervalMinutes": 1,
+        "SaveSecond": 10,
+        "RetentionDays": 2,
+        "MaxDatabaseSizeMB": 1,
+        "CleanupIntervalSeconds": 10,
+        "VacuumAfterCleanup": true
+    }
+}

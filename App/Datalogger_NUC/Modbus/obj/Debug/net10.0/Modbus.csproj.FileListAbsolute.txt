@@ -49,3 +49,6 @@ D:\Datalogger_NUC\Modbus\obj\Debug\net10.0\refint\Modbus.dll
 D:\Datalogger_NUC\Modbus\obj\Debug\net10.0\Modbus.pdb
 D:\Datalogger_NUC\Modbus\obj\Debug\net10.0\Modbus.genruntimeconfig.cache
 D:\Datalogger_NUC\Modbus\obj\Debug\net10.0\ref\Modbus.dll
+D:\Datalogger_NUC\modbus\bin\Debug\net10.0\RESPite.dll
+D:\Datalogger_NUC\modbus\bin\Debug\net10.0\StackExchange.Redis.dll
+D:\Datalogger_NUC\modbus\bin\Debug\net10.0\System.IO.Hashing.dll

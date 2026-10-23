@@ -2,43 +2,78 @@ using Ftp;
 using Ftp.Configuration;
 using Ftp.Services;
 using Ftp.Workers;
+using Microsoft.Extensions.Configuration;
+using StackExchange.Redis;
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
 
 var builder = WebApplication.CreateBuilder(args);
 
 // ============================================================
-// RUNTIME CONFIGURATION
+// APPSETTINGS - LOGGING
 // ============================================================
 
 builder
     .Configuration.SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile(RuntimePaths.AppSettings, optional: false, reloadOnChange: true);
+    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
 
 // ============================================================
-// APP SETTINGS
+// FTP RUNTIME CONFIGURATION
 // ============================================================
 
-builder.Services.Configure<AppSettings>(builder.Configuration);
+string ftpConfigPath = Path.Combine(AppContext.BaseDirectory, "RuntimeData", "FtpConfig.json");
+
+builder.Configuration.AddJsonFile(ftpConfigPath, optional: false, reloadOnChange: true);
+
+// Environment variables override JSON configuration.
+builder.Configuration.AddEnvironmentVariables();
+
+var ftpConfig = builder.Configuration;
+
+builder.Services.Configure<AppSettings>(ftpConfig);
 
 // ============================================================
-// DATABASE API
+// REDIS
 // ============================================================
 
-builder.Services.AddHttpClient(
-    "DatabaseApi",
-    client =>
+builder.Services.AddSingleton<IConnectionMultiplexer>(serviceProvider =>
+{
+    var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Ftp.Redis");
+
+    string connectionString = ftpConfig.GetConnectionString("Redis") ?? "localhost:6379";
+
+    ConfigurationOptions redisOptions = ConfigurationOptions.Parse(connectionString);
+
+    redisOptions.AbortOnConnectFail = false;
+    redisOptions.ConnectTimeout = 3000;
+    redisOptions.ConnectRetry = 1;
+    redisOptions.ReconnectRetryPolicy = new ExponentialRetry(3000);
+
+    logger.LogInformation("Initializing Redis connection to {RedisEndpoint}.", connectionString);
+
+    try
     {
-        string? baseUrl = builder.Configuration["DatabaseApi:BaseUrl"];
-
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            throw new InvalidOperationException("DatabaseApi:BaseUrl is not configured.");
-        }
-
-        client.BaseAddress = new Uri(baseUrl.EndsWith("/") ? baseUrl : baseUrl + "/");
-
-        client.Timeout = TimeSpan.FromSeconds(10);
+        return ConnectionMultiplexer.Connect(redisOptions);
     }
-);
+    catch (Exception ex)
+    {
+        logger.LogError(
+            ex,
+            "Redis connection initialization failed for {RedisEndpoint}.",
+            connectionString
+        );
+
+        throw;
+    }
+});
+
+// ============================================================
+// CONFIGURATION FILE SERVICE
+// ============================================================
+
+builder.Services.AddSingleton<FtpConfigFileService>();
 
 // ============================================================
 // SERVICES
@@ -60,7 +95,7 @@ builder.Services.AddHostedService(provider => provider.GetRequiredService<FtpWor
 // WEB PORT
 // ============================================================
 
-int webPort = builder.Configuration.GetValue<int>("Web:Port");
+int webPort = ftpConfig.GetValue<int>("Web:Port");
 
 if (webPort <= 0 || webPort > 65535)
 {
@@ -74,6 +109,14 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{webPort}");
 // ============================================================
 
 var app = builder.Build();
+
+// ============================================================
+// STARTUP LOGGING
+// ============================================================
+
+var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Ftp.Startup");
+
+logger.LogInformation("FTP service is starting on port {WebPort}.", webPort);
 
 // ============================================================
 // FTP API

@@ -5,12 +5,16 @@ services:
   # ==========================================================
 
   modbus:
-    image: nquangkhanh/datalogger-modbus:1.0
+    image: nquangkhanh/datalogger-modbus:2.0
     container_name: datalogger-modbus
     restart: unless-stopped
 
     environment:
       TZ: Asia/Ho_Chi_Minh
+      ConnectionStrings__Redis: "datalogger-redis:6379"
+
+    devices:
+      - "/dev/ttyS0:/dev/ttyS0"
 
     ports:
       - "5000:5000"
@@ -18,24 +22,28 @@ services:
     volumes:
       - ./RuntimeData:/app/RuntimeData
 
+    depends_on:
+      redis:
+        condition: service_healthy
+
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
 
-
   # ==========================================================
   # DATABASE
   # ==========================================================
 
   database:
-    image: nquangkhanh/datalogger-database:1.0
+    image: nquangkhanh/datalogger-database:2.0
     container_name: datalogger-database
     restart: unless-stopped
 
     environment:
       TZ: Asia/Ho_Chi_Minh
+      ConnectionStrings__Redis: "datalogger-redis:6379"
 
     ports:
       - "5001:5001"
@@ -43,24 +51,28 @@ services:
     volumes:
       - ./RuntimeData:/app/RuntimeData
 
+    depends_on:
+      redis:
+        condition: service_healthy
+
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
 
-
   # ==========================================================
   # MQTT
   # ==========================================================
 
   mqtt:
-    image: nquangkhanh/datalogger-mqtt:1.0
+    image: nquangkhanh/datalogger-mqtt:2.0
     container_name: datalogger-mqtt
     restart: unless-stopped
 
     environment:
       TZ: Asia/Ho_Chi_Minh
+      ConnectionStrings__Redis: "datalogger-redis:6379"
 
     ports:
       - "5003:5003"
@@ -68,30 +80,64 @@ services:
     volumes:
       - ./RuntimeData:/app/RuntimeData
 
+    depends_on:
+      redis:
+        condition: service_healthy
+
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
 
-
   # ==========================================================
   # FTP
   # ==========================================================
 
   ftp:
-    image: nquangkhanh/datalogger-ftp:1.0
+    image: nquangkhanh/datalogger-ftp:2.0
     container_name: datalogger-ftp
     restart: unless-stopped
 
     environment:
       TZ: Asia/Ho_Chi_Minh
+      ConnectionStrings__Redis: "datalogger-redis:6379"
 
     ports:
       - "5002:5002"
 
     volumes:
       - ./RuntimeData:/app/RuntimeData
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ==========================================================
+  # REDIS
+  # ==========================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: datalogger-redis
+    restart: unless-stopped
+
+    command: redis-server --save "" --appendonly no
+
+    ports:
+      - "6379:6379"
+
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
     logging:
       driver: json-file

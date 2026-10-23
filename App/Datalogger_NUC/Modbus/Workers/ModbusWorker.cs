@@ -1,75 +1,149 @@
 using System.IO.Ports;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Modbus.Configuration;
 using Modbus.Hardware;
 using Modbus.Models;
 using Modbus.Sensors;
 using Modbus.Services;
+using StackExchange.Redis;
 
 namespace Modbus.Workers;
 
 public class ModbusWorker : BackgroundService
 {
-    private const string ModbusTcpProtocol = "ModbusTcp";
-    private const string ModbusRtuProtocol = "ModbusRtu";
-
-    private const string ReadingTimestampFormat = "yyyyMMddHHmmss";
-
-    private const int ReconnectDelaySeconds = 2;
     private const int MaxParameterErrors = 3;
+    private const string TimestampFormat = "yyyyMMddHHmmss";
+    private const string RedisKeyPrefix = "modbus:readings:";
 
     private readonly ILogger<ModbusWorker> _logger;
     private readonly StationReader _stationReader;
     private readonly StationConfigurationService _configurationService;
     private readonly ReadingStore _readingStore;
+    private readonly IOptionsMonitor<AppSettings> _options;
+    private readonly IConnectionMultiplexer _redis;
 
-    // Chỉ giữ số giây cấu hình.
-    private readonly int _readIntervalSeconds;
+    private readonly SemaphoreSlim _reloadSignal = new(0, 1);
 
     public ModbusWorker(
         ILogger<ModbusWorker> logger,
         StationReader stationReader,
         StationConfigurationService configurationService,
         ReadingStore readingStore,
-        IOptions<AppSettings> options
+        IOptionsMonitor<AppSettings> options,
+        IConnectionMultiplexer redis
     )
     {
         _logger = logger;
         _stationReader = stationReader;
         _configurationService = configurationService;
         _readingStore = readingStore;
-
-        int readIntervalSeconds = options.Value.Sensor.ReadIntervalSeconds;
-
-        if (readIntervalSeconds <= 0)
-        {
-            throw new InvalidOperationException(
-                $"Sensor.ReadIntervalSeconds phải > 0. "
-                    + $"Giá trị hiện tại: {readIntervalSeconds}."
-            );
-        }
-
-        _readIntervalSeconds = readIntervalSeconds;
+        _options = options;
+        _redis = redis;
     }
 
-    // =========================================================
-    // WORKER
-    // =========================================================
+    // ============================================================
+    // RELOAD
+    // ============================================================
+
+    public void RequestReload()
+    {
+        try
+        {
+            _reloadSignal.Release();
+            _logger.LogInformation("Modbus reload requested.");
+        }
+        catch (SemaphoreFullException)
+        {
+            // Đã có yêu cầu reload đang chờ.
+        }
+        catch (ObjectDisposedException)
+        {
+            _logger.LogDebug("Reload signal đã được giải phóng.");
+        }
+    }
+
+    private async Task WaitForReloadAsync(CancellationToken token)
+    {
+        await _reloadSignal.WaitAsync(token);
+
+        while (_reloadSignal.Wait(0)) { }
+    }
+
+    // ============================================================
+    // EXECUTE
+    // ============================================================
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _logger.LogInformation("ModbusWorker started.");
+
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await RunWorkerIterationAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Bảo vệ vòng lặp chính: lỗi bất ngờ không làm
+                    // BackgroundService kết thúc vĩnh viễn.
+                    _logger.LogError(ex, "Lỗi ngoài dự kiến trong ModbusWorker. Sẽ thử lại.");
+                }
+
+                if (stoppingToken.IsCancellationRequested)
+                    break;
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Worker đang dừng.
+        }
+        finally
+        {
+            _logger.LogInformation("ModbusWorker stopped.");
+        }
+    }
+
+    private async Task RunWorkerIterationAsync(CancellationToken stoppingToken)
+    {
+        int interval = _options.CurrentValue.Sensor.ReadIntervalSeconds;
+
+        if (interval <= 0)
+        {
+            _logger.LogWarning("Sensor.ReadIntervalSeconds không hợp lệ: {Interval}.", interval);
+
+            await WaitForConfigurationAsync(stoppingToken);
+            return;
+        }
+
         List<StationDefinition> stations;
 
         try
         {
-            stations = _configurationService.LoadAll();
-
-            _logger.LogInformation("Đã load {Count} station configuration.", stations.Count);
+            stations = _configurationService.LoadAll().Where(x => x.Enabled).ToList();
         }
         catch (Exception ex)
+            when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
         {
-            _logger.LogCritical(ex, "Không thể load station configuration.");
+            _logger.LogWarning(ex, "Không thể load station.json. Sẽ thử lại.");
 
+            await WaitForConfigurationAsync(stoppingToken);
             return;
         }
 
@@ -77,466 +151,443 @@ public class ModbusWorker : BackgroundService
         {
             _logger.LogWarning("Không có station nào được Enable.");
 
+            await WaitForConfigurationAsync(stoppingToken);
             return;
         }
 
-        List<IGrouping<string, StationDefinition>> physicalGroups = stations
-            .GroupBy(
-                station => GetConnectionInfo(station.Connection).PhysicalKey,
-                StringComparer.OrdinalIgnoreCase
-            )
-            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        _logger.LogInformation("Đã tạo {Count} physical connection worker.", physicalGroups.Count);
+        using var reloadCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        List<Task> workers = new();
+        Task sessionTask = RunStationsAsync(stations, sessionCts.Token);
 
-        foreach (IGrouping<string, StationDefinition> group in physicalGroups)
-        {
-            List<StationDefinition> physicalStations = group.ToList();
-
-            _logger.LogInformation(
-                "Physical connection {Connection}: " + "{Count} station configuration.",
-                group.Key,
-                physicalStations.Count
-            );
-
-            workers.Add(RunPhysicalConnectionWorker(physicalStations, stoppingToken));
-        }
+        Task reloadTask = WaitForReloadAsync(reloadCts.Token);
 
         try
         {
-            await Task.WhenAll(workers);
-        }
-        catch (OperationCanceledException)
-        {
-            // Worker dừng bình thường.
-        }
+            Task completed = await Task.WhenAny(sessionTask, reloadTask);
 
-        _logger.LogInformation("ModbusWorker stopped.");
-    }
-
-    // =========================================================
-    // PHYSICAL CONNECTION WORKER
-    // =========================================================
-
-    private async Task RunPhysicalConnectionWorker(
-        List<StationDefinition> stations,
-        CancellationToken stoppingToken
-    )
-    {
-        if (stations.Count == 0)
-        {
-            return;
-        }
-
-        ConnectionInfo physicalInfo = GetConnectionInfo(stations[0].Connection);
-
-        string physicalKey = physicalInfo.PhysicalKey;
-
-        List<IGrouping<string, StationDefinition>> connectionGroups = stations
-            .GroupBy(
-                station => GetConnectionInfo(station.Connection).ConnectionKey,
-                StringComparer.OrdinalIgnoreCase
-            )
-            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        _logger.LogInformation(
-            "Physical connection {PhysicalConnection} có " + "{Count} cấu hình connection.",
-            physicalKey,
-            connectionGroups.Count
-        );
-
-        try
-        {
-            while (!stoppingToken.IsCancellationRequested)
+            if (completed == reloadTask)
             {
-                foreach (IGrouping<string, StationDefinition> group in connectionGroups)
-                {
-                    if (stoppingToken.IsCancellationRequested)
-                    {
-                        break;
-                    }
+                await reloadTask;
 
-                    await RunConnectionCycle(group.ToList(), stoppingToken);
-                }
+                _logger.LogInformation("Đang reload cấu hình Modbus.");
+            }
+            else
+            {
+                // Nếu session kết thúc do exception, exception được
+                // bắt ở đây; vòng lặp ngoài sẽ khởi động phiên mới.
+                await sessionTask;
+
+                _logger.LogWarning("Phiên đọc Modbus kết thúc.");
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Worker dừng bình thường.
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogCritical(
-                ex,
-                "Physical connection worker {Connection} bị dừng.",
-                physicalKey
-            );
-        }
-
-        _logger.LogInformation("Physical connection worker stopped: {Connection}", physicalKey);
-    }
-
-    // =========================================================
-    // CONNECTION CYCLE
-    // =========================================================
-
-    private async Task RunConnectionCycle(
-        List<StationDefinition> stations,
-        CancellationToken stoppingToken
-    )
-    {
-        if (stations.Count == 0)
-        {
-            return;
-        }
-
-        ConnectionDefinition connection = stations[0].Connection;
-
-        ConnectionInfo connectionInfo = GetConnectionInfo(connection);
-
-        string connectionKey = connectionInfo.ConnectionKey;
-
-        DateTime cycleStart = DateTime.UtcNow;
-
-        IModbusClient? client = null;
-
-        try
-        {
-            // -------------------------------------------------
-            // CREATE
-            // -------------------------------------------------
-
-            client = TryCreateClient(connection, connectionKey);
-
-            if (client == null)
-            {
-                HandleConnectionFailure(stations, connectionKey);
-
-                if (AreAllParametersFailed(stations))
-                {
-                    await Reconnect(connectionKey, stoppingToken);
-                }
-                else
-                {
-                    await WaitForNextCycle(cycleStart, stoppingToken);
-                }
-
-                return;
-            }
-
-            // -------------------------------------------------
-            // OPEN
-            // -------------------------------------------------
-
-            if (!TryOpenClient(client, connectionKey))
-            {
-                HandleConnectionFailure(stations, connectionKey);
-
-                if (AreAllParametersFailed(stations))
-                {
-                    await Reconnect(connectionKey, stoppingToken);
-                }
-                else
-                {
-                    await WaitForNextCycle(cycleStart, stoppingToken);
-                }
-
-                return;
-            }
-
-            // -------------------------------------------------
-            // READ
-            // -------------------------------------------------
-
-            CycleStatus status = ReadStations(stations, client, connectionKey, stoppingToken);
-
-            // -------------------------------------------------
-            // CHECK RECONNECT
-            // -------------------------------------------------
-
-            if (AreAllParametersFailed(stations))
-            {
-                _logger.LogError(
-                    "Tất cả parameter trên connection {Connection} "
-                        + "đều đạt {MaxErrors} lỗi liên tiếp. "
-                        + "Restart connection.",
-                    connectionKey,
-                    MaxParameterErrors
-                );
-
-                await Reconnect(connectionKey, stoppingToken);
-
-                return;
-            }
-
-            // -------------------------------------------------
-            // LOG
-            // -------------------------------------------------
-
-            LogCycleResult(connectionKey, status);
-
-            // -------------------------------------------------
-            // WAIT NEXT READ
-            // -------------------------------------------------
-
-            await WaitForNextCycle(cycleStart, stoppingToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Worker dừng bình thường.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogCritical(
-                ex,
-                "Connection worker {Connection} bị lỗi ngoài dự kiến.",
-                connectionKey
-            );
+            _logger.LogError(ex, "Lỗi trong phiên đọc Modbus. Sẽ khởi động lại phiên.");
         }
         finally
         {
-            SafeClose(client, connectionKey);
+            await sessionCts.CancelAsync();
+
+            await ObserveTaskAsync(sessionTask, "Phiên đọc Modbus");
+
+            await reloadCts.CancelAsync();
+
+            await ObserveTaskAsync(reloadTask, "Tác vụ chờ reload");
         }
     }
 
-    // =========================================================
-    // CREATE CLIENT
-    // =========================================================
-
-    private IModbusClient? TryCreateClient(ConnectionDefinition connection, string connectionKey)
+    private async Task ObserveTaskAsync(Task task, string taskName)
     {
         try
         {
-            _logger.LogDebug("Tạo Modbus client cho {Connection}.", connectionKey);
-
-            return CreateClient(connection);
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+            // Tác vụ đã được yêu cầu dừng.
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Không thể tạo Modbus client cho {Connection}.", connectionKey);
-
-            return null;
+            _logger.LogError(ex, "{TaskName} kết thúc với lỗi.", taskName);
         }
     }
 
-    // =========================================================
-    // OPEN CLIENT
-    // =========================================================
-
-    private bool TryOpenClient(IModbusClient client, string connectionKey)
+    private async Task WaitForConfigurationAsync(CancellationToken token)
     {
         try
         {
-            _logger.LogInformation("Mở connection {Connection}.", connectionKey);
-
-            client.Open();
-
-            _logger.LogInformation("Connection {Connection} đã mở.", connectionKey);
-
-            return true;
+            if (await _reloadSignal.WaitAsync(TimeSpan.FromSeconds(5), token))
+            {
+                while (_reloadSignal.Wait(0)) { }
+            }
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Không thể mở connection {Connection}.", connectionKey);
-
-            return false;
+            // Worker đang dừng.
         }
     }
 
-    // =========================================================
-    // READ ALL STATIONS
-    // =========================================================
+    // ============================================================
+    // GLOBAL READ CYCLE
+    // ============================================================
 
-    private CycleStatus ReadStations(
-        List<StationDefinition> stations,
-        IModbusClient client,
-        string connectionKey,
-        CancellationToken stoppingToken
+    private async Task RunStationsAsync(List<StationDefinition> stations, CancellationToken token)
+    {
+        var connections = stations
+            .SelectMany(station =>
+                station.Connections.Select(connection => (Station: station, Connection: connection))
+            )
+            .ToList();
+
+        if (connections.Count == 0)
+        {
+            _logger.LogWarning("Không có connection nào được cấu hình.");
+
+            return;
+        }
+
+        var groups = connections.GroupBy(x => PhysicalKey(x.Connection.Connection)).ToList();
+
+        _logger.LogInformation(
+            "Load {Stations} station, {Connections} connection, {Physical} physical connection.",
+            stations.Count,
+            connections.Count,
+            groups.Count
+        );
+
+        while (!token.IsCancellationRequested)
+        {
+            DateTime cycleStart = DateTime.UtcNow;
+
+            // Bước 1: Đọc các physical connection song song.
+            // Exception của một nhóm được xử lý độc lập.
+            await Task.WhenAll(
+                groups.Select(async group =>
+                {
+                    token.ThrowIfCancellationRequested();
+
+                    try
+                    {
+                        await RunPhysicalConnection(group.ToList(), token);
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(
+                            ex,
+                            "Lỗi physical connection {Connection}. Tiếp tục các nhóm khác.",
+                            group.Key
+                        );
+                    }
+                })
+            );
+
+            token.ThrowIfCancellationRequested();
+
+            // Bước 2: Cập nhật snapshot Redis.
+            // Hàm này tự bắt lỗi Redis nên không làm dừng
+            // chu kỳ đọc Modbus khi Redis mất kết nối.
+            await UpdateRedisReadingsAsync(stations, token);
+
+            _logger.LogDebug("Đã hoàn thành chu kỳ đọc và cập nhật Redis.");
+
+            // Bước 3: Đợi chu kỳ kế tiếp.
+            int interval = _options.CurrentValue.Sensor.ReadIntervalSeconds;
+
+            if (interval <= 0)
+            {
+                _logger.LogWarning(
+                    "Sensor.ReadIntervalSeconds không hợp lệ: {Interval}.",
+                    interval
+                );
+
+                await Task.Delay(TimeSpan.FromSeconds(5), token);
+
+                continue;
+            }
+
+            double remainingSeconds = interval - (DateTime.UtcNow - cycleStart).TotalSeconds;
+
+            if (remainingSeconds > 0)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(remainingSeconds), token);
+            }
+        }
+    }
+
+    // ============================================================
+    // PHYSICAL CONNECTION
+    // ============================================================
+
+    private async Task RunPhysicalConnection(
+        List<(StationDefinition Station, StationConnectionDefinition Connection)> connections,
+        CancellationToken token
     )
     {
-        bool anySuccess = false;
-        bool anyParameterFailure = false;
+        var groups = connections.GroupBy(x => ConnectionKey(x.Connection.Connection)).ToList();
 
-        foreach (StationDefinition station in stations)
+        foreach (var group in groups)
         {
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
+            token.ThrowIfCancellationRequested();
 
             try
             {
-                LogStationReadStart(station, connectionKey);
-
-                StationReader.StationReadResult readResult = _stationReader.ReadStation(
-                    station.StationName,
-                    station.Sensors,
-                    client
-                );
-
-                // -------------------------------------------------
-                // SUCCESS
-                // -------------------------------------------------
-
-                if (ProcessSuccessfulReadings(readResult.Readings))
-                {
-                    anySuccess = true;
-                }
-
-                // -------------------------------------------------
-                // CONNECTION FAILURE
-                // -------------------------------------------------
-
-                StationReader.SlaveReadError? connectionError = readResult.Errors.FirstOrDefault(
-                    error => IsConnectionFailure(error.Exception)
-                );
-
-                if (connectionError != null)
-                {
-                    LogConnectionFailure(station, connectionError);
-
-                    // Connection failure:
-                    // Tất cả parameter của connection +1.
-                    HandleConnectionFailure(stations, connectionKey);
-
-                    // Kết thúc cycle ngay.
-                    return CycleStatus.ConnectionFailure;
-                }
-
-                // -------------------------------------------------
-                // PARAMETER ERROR
-                // -------------------------------------------------
-
-                foreach (StationReader.SlaveReadError error in readResult.Errors)
-                {
-                    if (error.Parameters.Count == 0)
-                    {
-                        LogGeneralReadError(station, error);
-
-                        continue;
-                    }
-
-                    anyParameterFailure = true;
-
-                    ProcessParameterErrors(station, error);
-                }
+                await RunConnection(group.ToList(), token);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                break;
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogError(
                     ex,
-                    "Lỗi ngoài dự kiến khi đọc "
-                        + "Station={Station} | "
-                        + "Connection={Connection}",
-                    station.StationName,
-                    connectionKey
+                    "Lỗi connection {Connection}. Tiếp tục connection khác.",
+                    group.Key
                 );
             }
         }
-
-        if (anySuccess)
-        {
-            return CycleStatus.Success;
-        }
-
-        if (anyParameterFailure)
-        {
-            return CycleStatus.ParameterFailure;
-        }
-
-        return CycleStatus.NoData;
     }
 
-    // =========================================================
-    // PROCESS SUCCESSFUL READINGS
-    // =========================================================
+    // ============================================================
+    // CONNECTION
+    // ============================================================
 
-    private bool ProcessSuccessfulReadings(List<SensorReading> readings)
-    {
-        bool anySuccess = false;
-
-        foreach (SensorReading reading in readings)
-        {
-            // Đọc thành công
-            // => reset counter parameter về 0.
-
-            _readingStore.ResetParameterErrorCount(
-                reading.StationName,
-                reading.SlaveId,
-                reading.Name
-            );
-
-            _readingStore.UpdateReading(reading);
-
-            anySuccess = true;
-
-            _logger.LogDebug(
-                "Parameter đọc thành công | "
-                    + "Station={Station} | "
-                    + "Slave={Slave} | "
-                    + "Parameter={Parameter} | "
-                    + "Value={Value} | "
-                    + "Status={Status}",
-                reading.StationName,
-                reading.SlaveId,
-                reading.Name,
-                reading.Value,
-                reading.Status
-            );
-        }
-
-        return anySuccess;
-    }
-
-    // =========================================================
-    // PROCESS PARAMETER ERRORS
-    // =========================================================
-
-    private void ProcessParameterErrors(
-        StationDefinition station,
-        StationReader.SlaveReadError error
+    private async Task RunConnection(
+        List<(StationDefinition Station, StationConnectionDefinition Connection)> connections,
+        CancellationToken token
     )
     {
-        foreach (ParameterDefinition parameter in error.Parameters)
+        if (connections.Count == 0)
+            return;
+
+        var definition = connections[0].Connection.Connection;
+
+        string key = ConnectionKey(definition);
+
+        IModbusClient? client = null;
+
+        try
         {
-            HandleParameterReadError(
-                station,
-                error.SlaveId,
-                parameter,
-                error.Exception,
-                error.Message
+            token.ThrowIfCancellationRequested();
+
+            client = CreateClient(definition);
+
+            try
+            {
+                client.Open();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Không mở được connection {Connection}.", key);
+
+                HandleConnectionFailure(connections, key);
+
+                return;
+            }
+
+            foreach (var item in connections)
+            {
+                token.ThrowIfCancellationRequested();
+
+                ReadStation(item, client, key);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Đang reload hoặc dừng worker.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Connection {Connection} bị lỗi.", key);
+        }
+        finally
+        {
+            try
+            {
+                client?.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Không thể đóng connection {Connection}.", key);
+            }
+        }
+
+        await Task.CompletedTask;
+    }
+
+    // ============================================================
+    // READ STATION
+    // Chỉ cập nhật ReadingStore, không ghi Redis tại đây.
+    // ============================================================
+
+    private void ReadStation(
+        (StationDefinition Station, StationConnectionDefinition Connection) item,
+        IModbusClient client,
+        string connectionKey
+    )
+    {
+        try
+        {
+            var result = _stationReader.ReadStation(
+                item.Station.StationName,
+                item.Connection.Sensors,
+                client
+            );
+
+            foreach (
+                var failed in result
+                    .FailedParameters.GroupBy(x => new { x.SlaveId, Parameter = x.Parameter.Name })
+                    .Select(group => group.First())
+            )
+            {
+                HandleParameterError(
+                    connectionKey,
+                    item.Station,
+                    failed.SlaveId,
+                    failed.Parameter,
+                    new IOException("Không đọc được Value block."),
+                    "Value block failure"
+                );
+            }
+
+            foreach (var reading in result.Readings)
+            {
+                _readingStore.ResetParameterErrorCount(
+                    connectionKey,
+                    reading.StationName,
+                    reading.SlaveId,
+                    reading.Name
+                );
+
+                _readingStore.UpdateReading(connectionKey, reading);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Lỗi đọc Station={Station} Connection={Connection}.",
+                item.Station.StationName,
+                connectionKey
             );
         }
     }
 
-    // =========================================================
-    // HANDLE PARAMETER ERROR
-    //
-    // Mỗi parameter có counter riêng.
-    //
-    // Đọc lỗi:
-    //     count++
-    //
-    // count < 3:
-    //     giữ reading cũ
-    //
-    // count >= 3:
-    //     Value  = 0
-    //     Status = Error
-    //
-    // Đọc thành công:
-    //     counter = 0
-    // =========================================================
+    // ============================================================
+    // REDIS
+    // Mỗi station có một Hash chứa snapshot readings mới nhất.
+    // Redis lỗi không được phép làm dừng chu kỳ đọc Modbus.
+    // ============================================================
 
-    private void HandleParameterReadError(
+    private async Task UpdateRedisReadingsAsync(
+        List<StationDefinition> stations,
+        CancellationToken token
+    )
+    {
+        try
+        {
+            IDatabase db = _redis.GetDatabase();
+
+            var latestReadings = _readingStore.GetLatestReadings();
+
+            var enabledStationNames = stations
+                .Select(x => x.StationName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var readingsByStation = latestReadings
+                .Where(x => enabledStationNames.Contains(x.StationName))
+                .GroupBy(x => x.StationName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.ToList(),
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            foreach (var station in stations)
+            {
+                token.ThrowIfCancellationRequested();
+
+                string redisKey = $"{RedisKeyPrefix}{station.StationName}";
+
+                readingsByStation.TryGetValue(station.StationName, out var stationReadings);
+
+                var entries = (stationReadings ?? new List<SensorReading>())
+                    .Select(reading => new HashEntry(
+                        reading.Name,
+                        JsonSerializer.Serialize(reading)
+                    ))
+                    .ToArray();
+
+                ITransaction transaction = db.CreateTransaction();
+
+                _ = transaction.KeyDeleteAsync(redisKey);
+
+                if (entries.Length > 0)
+                {
+                    _ = transaction.HashSetAsync(redisKey, entries);
+                }
+
+                bool committed = await transaction.ExecuteAsync();
+
+                if (!committed)
+                {
+                    _logger.LogWarning(
+                        "Redis transaction không thành công cho Station={Station}.",
+                        station.StationName
+                    );
+
+                    continue;
+                }
+
+                _logger.LogDebug(
+                    "Đã cập nhật Redis cho Station={Station}, Readings={Count}.",
+                    station.StationName,
+                    entries.Length
+                );
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (RedisException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Redis không khả dụng. Modbus vẫn tiếp tục đọc; sẽ thử ghi lại ở chu kỳ sau."
+            );
+        }
+        catch (Exception ex)
+        {
+            // Bao gồm lỗi phát sinh khi tạo snapshot hoặc ghi Redis.
+            // Không cho lỗi cập nhật snapshot làm dừng worker.
+            _logger.LogWarning(
+                ex,
+                "Không thể cập nhật readings vào Redis. Modbus vẫn tiếp tục chạy."
+            );
+        }
+    }
+
+    // ============================================================
+    // PARAMETER ERROR
+    // ============================================================
+
+    private void HandleParameterError(
+        string connectionKey,
         StationDefinition station,
         byte slaveId,
         ParameterDefinition parameter,
@@ -544,76 +595,31 @@ public class ModbusWorker : BackgroundService
         string message
     )
     {
-        int errorCount = _readingStore.IncrementParameterErrorCount(
+        int count = _readingStore.IncrementParameterErrorCount(
+            connectionKey,
             station.StationName,
             slaveId,
             parameter.Name
         );
 
-        // -----------------------------------------------------
-        // CHƯA ĐỦ 3 LẦN
-        // -----------------------------------------------------
-
-        if (errorCount < MaxParameterErrors)
+        if (count < MaxParameterErrors)
         {
             _logger.LogWarning(
                 ex,
-                "{Message} | "
-                    + "Station={Station} | "
-                    + "Slave={Slave} | "
-                    + "Parameter={Parameter} | "
-                    + "Error={Count}/{MaxErrors} | "
-                    + "GIỮ READING CŨ",
+                "{Message} | Station={Station} | Connection={Connection} | Slave={Slave} | Parameter={Parameter} | ErrorCount={Count}/{Max}",
                 message,
                 station.StationName,
+                connectionKey,
                 slaveId,
                 parameter.Name,
-                errorCount,
+                count,
                 MaxParameterErrors
             );
 
             return;
         }
 
-        // -----------------------------------------------------
-        // ĐỦ 3 LẦN
-        // -----------------------------------------------------
-
-        SensorReading errorReading = CreateErrorReading(station, slaveId, parameter);
-
-        _readingStore.UpdateReading(errorReading);
-
-        _logger.LogError(
-            ex,
-            "{Message} | "
-                + "Station={Station} | "
-                + "Slave={Slave} | "
-                + "Parameter={Parameter} | "
-                + "Error={Count}/{MaxErrors} | "
-                + "Value={Value} | "
-                + "Status={Status}",
-            message,
-            station.StationName,
-            slaveId,
-            parameter.Name,
-            errorCount,
-            MaxParameterErrors,
-            errorReading.Value,
-            errorReading.Status
-        );
-    }
-
-    // =========================================================
-    // CREATE ERROR READING
-    // =========================================================
-
-    private static SensorReading CreateErrorReading(
-        StationDefinition station,
-        byte slaveId,
-        ParameterDefinition parameter
-    )
-    {
-        return new SensorReading
+        var reading = new SensorReading
         {
             StationName = station.StationName,
             SlaveId = slaveId,
@@ -621,396 +627,122 @@ public class ModbusWorker : BackgroundService
             Value = 0,
             Unit = parameter.Unit,
             Status = StatusCode.Error,
-            Timestamp = DateTime.Now.ToString(ReadingTimestampFormat),
+            Timestamp = DateTime.Now.ToString(TimestampFormat),
         };
-    }
 
-    // =========================================================
-    // HANDLE CONNECTION FAILURE
-    //
-    // Connection failure:
-    //
-    // TẤT CẢ parameter thuộc connection
-    //     => errorCount +1
-    //
-    // Sau đó cycle kết thúc.
-    // =========================================================
+        _readingStore.UpdateReading(connectionKey, reading);
 
-    private void HandleConnectionFailure(List<StationDefinition> stations, string connectionKey)
-    {
-        _logger.LogWarning(
-            "Connection failure: {Connection}. " + "Tất cả parameter sẽ được cộng 1 lỗi.",
-            connectionKey
+        _logger.LogError(
+            ex,
+            "Parameter lỗi {Count}/{Max} | Station={Station} | Connection={Connection} | Slave={Slave} | Parameter={Parameter} | Value={Value} | Unit={Unit} | Status={Status}",
+            count,
+            MaxParameterErrors,
+            station.StationName,
+            connectionKey,
+            slaveId,
+            parameter.Name,
+            reading.Value,
+            reading.Unit,
+            reading.Status
         );
-
-        foreach (ParameterContext context in EnumerateParameters(stations))
-        {
-            HandleParameterReadError(
-                context.Station,
-                context.SlaveId,
-                context.Parameter,
-                new IOException("Connection không đọc được."),
-                $"Không đọc được parameter " + $"do connection {connectionKey}."
-            );
-        }
     }
 
-    // =========================================================
-    // CHECK ALL PARAMETERS
-    // =========================================================
-
-    private bool AreAllParametersFailed(List<StationDefinition> stations)
-    {
-        bool hasParameter = false;
-
-        foreach (ParameterContext context in EnumerateParameters(stations))
-        {
-            hasParameter = true;
-
-            int errorCount = _readingStore.GetParameterErrorCount(
-                context.Station.StationName,
-                context.SlaveId,
-                context.Parameter.Name
-            );
-
-            _logger.LogDebug(
-                "Parameter error counter | "
-                    + "Station={Station} | "
-                    + "Slave={Slave} | "
-                    + "Parameter={Parameter} | "
-                    + "Count={Count}/{MaxErrors}",
-                context.Station.StationName,
-                context.SlaveId,
-                context.Parameter.Name,
-                errorCount,
-                MaxParameterErrors
-            );
-
-            if (errorCount < MaxParameterErrors)
-            {
-                return false;
-            }
-        }
-
-        return hasParameter;
-    }
-
-    // =========================================================
-    // ENUMERATE PARAMETERS
-    // =========================================================
-
-    private static IEnumerable<ParameterContext> EnumerateParameters(
-        IEnumerable<StationDefinition> stations
+    private void HandleConnectionFailure(
+        List<(StationDefinition Station, StationConnectionDefinition Connection)> connections,
+        string connectionKey
     )
     {
-        foreach (StationDefinition station in stations)
+        foreach (var item in connections)
         {
-            foreach (SlaveDefinition slave in station.Sensors)
+            foreach (var slave in item.Connection.Sensors)
             {
-                foreach (RegisterBlockDefinition block in slave.Blocks)
+                foreach (var block in slave.Blocks)
                 {
-                    foreach (ParameterDefinition parameter in block.Parameters)
+                    foreach (var parameter in block.Parameters)
                     {
-                        yield return new ParameterContext(station, slave.SlaveId, parameter);
+                        HandleParameterError(
+                            connectionKey,
+                            item.Station,
+                            slave.SlaveId,
+                            parameter,
+                            new IOException("Connection không đọc được."),
+                            "Connection failure"
+                        );
                     }
                 }
             }
         }
     }
 
-    // =========================================================
-    // LOG
-    // =========================================================
+    // ============================================================
+    // MODBUS CLIENT
+    // ============================================================
 
-    private void LogStationReadStart(StationDefinition station, string connectionKey)
+    private static IModbusClient CreateClient(ConnectionDefinition connection)
     {
-        _logger.LogDebug(
-            "Đọc Station={Station} | Connection={Connection}",
-            station.StationName,
-            connectionKey
-        );
-    }
-
-    private void LogConnectionFailure(StationDefinition station, StationReader.SlaveReadError error)
-    {
-        _logger.LogWarning(
-            error.Exception,
-            "{Message} | Station={Station} | " + "Slave={Slave} | Connection failure.",
-            error.Message,
-            station.StationName,
-            error.SlaveId
-        );
-    }
-
-    private void LogGeneralReadError(StationDefinition station, StationReader.SlaveReadError error)
-    {
-        _logger.LogWarning(
-            error.Exception,
-            "{Message} | Station={Station} | Slave={Slave}",
-            error.Message,
-            station.StationName,
-            error.SlaveId
-        );
-    }
-
-    // =========================================================
-    // CHECK CONNECTION FAILURE
-    // =========================================================
-
-    private static bool IsConnectionFailure(Exception exception)
-    {
-        return exception is InvalidOperationException;
-    }
-
-    // =========================================================
-    // LOG CYCLE RESULT
-    // =========================================================
-
-    private void LogCycleResult(string connectionKey, CycleStatus status)
-    {
-        switch (status)
+        if (connection.Protocol.Equals("ModbusRtu", StringComparison.OrdinalIgnoreCase))
         {
-            case CycleStatus.Success:
+            if (!Enum.TryParse(connection.Parity, true, out Parity parity))
+            {
+                throw new InvalidOperationException($"Parity không hợp lệ: {connection.Parity}");
+            }
 
-                _logger.LogDebug("Connection {Connection} hoạt động bình thường.", connectionKey);
-
-                break;
-
-            case CycleStatus.ParameterFailure:
-
-                _logger.LogWarning(
-                    "Connection {Connection}: " + "cycle có parameter lỗi.",
-                    connectionKey
+            if (!Enum.TryParse(connection.StopBits, true, out StopBits stopBits))
+            {
+                throw new InvalidOperationException(
+                    $"StopBits không hợp lệ: {connection.StopBits}"
                 );
+            }
 
-                break;
-
-            case CycleStatus.NoData:
-
-                _logger.LogDebug(
-                    "Connection {Connection}: " + "cycle không có dữ liệu.",
-                    connectionKey
-                );
-
-                break;
-
-            case CycleStatus.ConnectionFailure:
-
-                _logger.LogWarning(
-                    "Connection {Connection}: " + "cycle bị connection failure.",
-                    connectionKey
-                );
-
-                break;
-        }
-    }
-
-    // =========================================================
-    // WAIT NEXT READ
-    //
-    // Chu kỳ đọc tính từ lúc BẮT ĐẦU cycle.
-    //
-    // Ví dụ ReadIntervalSeconds = 5:
-    //
-    // Đọc mất 2s:
-    //     chờ thêm 3s
-    //
-    // Đọc mất 5s:
-    //     đọc tiếp ngay
-    //
-    // Đọc mất 8s:
-    //     đọc tiếp ngay
-    // =========================================================
-
-    private async Task WaitForNextCycle(DateTime cycleStart, CancellationToken stoppingToken)
-    {
-        TimeSpan elapsed = DateTime.UtcNow - cycleStart;
-
-        double remainingSeconds = _readIntervalSeconds - elapsed.TotalSeconds;
-
-        if (remainingSeconds <= 0)
-        {
-            return;
+            return new ModbusRtu(
+                connection.PortName,
+                connection.BaudRate,
+                parity,
+                connection.DataBits,
+                stopBits
+            );
         }
 
-        try
+        if (connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase))
         {
-            await Task.Delay(TimeSpan.FromSeconds(remainingSeconds), stoppingToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Worker dừng bình thường.
-        }
-    }
-
-    // =========================================================
-    // RECONNECT
-    // =========================================================
-
-    private async Task Reconnect(string connectionKey, CancellationToken stoppingToken)
-    {
-        _logger.LogWarning(
-            "Restart connection {Connection} sau {Seconds}s.",
-            connectionKey,
-            ReconnectDelaySeconds
-        );
-
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(ReconnectDelaySeconds), stoppingToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Worker dừng bình thường.
-        }
-    }
-
-    // =========================================================
-    // CONNECTION INFO
-    // =========================================================
-
-    private static ConnectionInfo GetConnectionInfo(ConnectionDefinition connection)
-    {
-        if (connection.Protocol.Equals(ModbusTcpProtocol, StringComparison.OrdinalIgnoreCase))
-        {
-            string key = $"tcp:{connection.IpAddress}:{connection.Port}";
-
-            return new ConnectionInfo(key, key);
-        }
-
-        if (connection.Protocol.Equals(ModbusRtuProtocol, StringComparison.OrdinalIgnoreCase))
-        {
-            string physicalKey = $"rtu:{connection.PortName}";
-
-            string connectionKey =
-                $"rtu:"
-                + $"{connection.PortName}:"
-                + $"{connection.BaudRate}:"
-                + $"{connection.Parity}:"
-                + $"{connection.DataBits}:"
-                + $"{connection.StopBits}";
-
-            return new ConnectionInfo(physicalKey, connectionKey);
-        }
-
-        string unknownKey = $"unknown:{connection.Protocol}";
-
-        return new ConnectionInfo(unknownKey, unknownKey);
-    }
-
-    // =========================================================
-    // CREATE MODBUS CLIENT
-    // =========================================================
-
-    private IModbusClient CreateClient(ConnectionDefinition connection)
-    {
-        if (connection.Protocol.Equals(ModbusRtuProtocol, StringComparison.OrdinalIgnoreCase))
-        {
-            return CreateRtuClient(connection);
-        }
-
-        if (connection.Protocol.Equals(ModbusTcpProtocol, StringComparison.OrdinalIgnoreCase))
-        {
-            return CreateTcpClient(connection);
+            return new ModbusTcp(connection.IpAddress, connection.Port);
         }
 
         throw new NotSupportedException($"Protocol không hỗ trợ: {connection.Protocol}");
     }
 
-    // =========================================================
-    // CREATE RTU CLIENT
-    // =========================================================
+    // ============================================================
+    // CONNECTION KEYS
+    // ============================================================
 
-    private IModbusClient CreateRtuClient(ConnectionDefinition connection)
+    private static string PhysicalKey(ConnectionDefinition connection)
     {
-        if (string.IsNullOrWhiteSpace(connection.PortName))
+        if (connection.Protocol.Equals("ModbusRtu", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("Modbus RTU chưa có PortName.");
+            return $"rtu:{connection.PortName}";
         }
 
-        if (string.IsNullOrWhiteSpace(connection.Parity))
+        if (connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("Modbus RTU chưa có Parity.");
+            return $"tcp:{connection.IpAddress}:{connection.Port}";
         }
 
-        if (string.IsNullOrWhiteSpace(connection.StopBits))
-        {
-            throw new InvalidOperationException("Modbus RTU chưa có StopBits.");
-        }
-
-        if (!Enum.TryParse<Parity>(connection.Parity, true, out Parity parity))
-        {
-            throw new InvalidOperationException($"Parity không hợp lệ: {connection.Parity}");
-        }
-
-        if (!Enum.TryParse<StopBits>(connection.StopBits, true, out StopBits stopBits))
-        {
-            throw new InvalidOperationException($"StopBits không hợp lệ: {connection.StopBits}");
-        }
-
-        return new ModbusRtu(
-            connection.PortName,
-            connection.BaudRate,
-            parity,
-            connection.DataBits,
-            stopBits
-        );
+        return $"unknown:{connection.Protocol}";
     }
 
-    // =========================================================
-    // CREATE TCP CLIENT
-    // =========================================================
-
-    private IModbusClient CreateTcpClient(ConnectionDefinition connection)
+    private static string ConnectionKey(ConnectionDefinition connection)
     {
-        if (string.IsNullOrWhiteSpace(connection.IpAddress))
+        if (connection.Protocol.Equals("ModbusRtu", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("Modbus TCP chưa có IpAddress.");
+            return $"rtu:{connection.PortName}:{connection.BaudRate}:"
+                + $"{connection.Parity}:{connection.DataBits}:{connection.StopBits}";
         }
 
-        return new ModbusTcp(connection.IpAddress, connection.Port);
+        if (connection.Protocol.Equals("ModbusTcp", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"tcp:{connection.IpAddress}:{connection.Port}";
+        }
+
+        return $"unknown:{connection.Protocol}";
     }
-
-    // =========================================================
-    // SAFE CLOSE
-    // =========================================================
-
-    private void SafeClose(IModbusClient? client, string connectionKey)
-    {
-        if (client == null)
-        {
-            return;
-        }
-
-        try
-        {
-            client.Close();
-
-            _logger.LogInformation("Connection {Connection} đã đóng.", connectionKey);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Không thể đóng connection {Connection}.", connectionKey);
-        }
-    }
-
-    // =========================================================
-    // TYPES
-    // =========================================================
-
-    private enum CycleStatus
-    {
-        Success,
-        ParameterFailure,
-        NoData,
-        ConnectionFailure,
-    }
-
-    private readonly record struct ConnectionInfo(string PhysicalKey, string ConnectionKey);
-
-    private readonly record struct ParameterContext(
-        StationDefinition Station,
-        byte SlaveId,
-        ParameterDefinition Parameter
-    );
 }

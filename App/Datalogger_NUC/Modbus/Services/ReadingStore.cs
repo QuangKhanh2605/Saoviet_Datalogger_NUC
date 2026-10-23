@@ -4,50 +4,28 @@ namespace Modbus.Services;
 
 public class ReadingStore
 {
+    // ============================================================
+    // LATEST READINGS
+    // ============================================================
+
     private readonly object _readingLock = new();
 
-    private readonly List<SensorReading> _latestReadings = [];
-
-    private readonly object _errorLock = new();
-
-    private readonly Dictionary<string, int> _parameterErrorCounts = new(
+    private readonly Dictionary<string, SensorReading> _latestReadings = new(
         StringComparer.OrdinalIgnoreCase
     );
 
-    public void UpdateReadings(List<SensorReading> readings)
+    public void UpdateReading(string connectionKey, SensorReading reading)
     {
         lock (_readingLock)
         {
-            foreach (SensorReading reading in readings)
-            {
-                UpdateReadingInternal(reading);
-            }
-        }
-    }
+            string key = BuildKey(
+                connectionKey,
+                reading.StationName,
+                reading.SlaveId,
+                reading.Name
+            );
 
-    public void UpdateReading(SensorReading reading)
-    {
-        lock (_readingLock)
-        {
-            UpdateReadingInternal(reading);
-        }
-    }
-
-    private void UpdateReadingInternal(SensorReading reading)
-    {
-        int index = _latestReadings.FindIndex(x =>
-            string.Equals(x.StationName, reading.StationName, StringComparison.OrdinalIgnoreCase)
-            && x.SlaveId == reading.SlaveId
-            && string.Equals(x.Name, reading.Name, StringComparison.OrdinalIgnoreCase)
-        );
-
-        if (index >= 0)
-        {
-            _latestReadings[index] = CloneReading(reading);
-        }
-        else
-        {
-            _latestReadings.Add(CloneReading(reading));
+            _latestReadings[key] = CloneReading(reading);
         }
     }
 
@@ -55,27 +33,28 @@ public class ReadingStore
     {
         lock (_readingLock)
         {
-            return _latestReadings.Select(CloneReading).ToList();
+            return _latestReadings.Values.Select(CloneReading).ToList();
         }
     }
 
-    public SensorReading? GetLatestReading(string stationName, byte slaveId, string Name)
-    {
-        lock (_readingLock)
-        {
-            SensorReading? reading = _latestReadings.FirstOrDefault(x =>
-                string.Equals(x.StationName, stationName, StringComparison.OrdinalIgnoreCase)
-                && x.SlaveId == slaveId
-                && string.Equals(x.Name, Name, StringComparison.OrdinalIgnoreCase)
-            );
+    // ============================================================
+    // PARAMETER ERROR COUNTERS
+    // ============================================================
 
-            return reading == null ? null : CloneReading(reading);
-        }
-    }
+    private readonly object _errorLock = new();
 
-    public int IncrementParameterErrorCount(string stationName, byte slaveId, string Name)
+    private readonly Dictionary<string, int> _parameterErrorCounts = new(
+        StringComparer.OrdinalIgnoreCase
+    );
+
+    public int IncrementParameterErrorCount(
+        string connectionKey,
+        string stationName,
+        byte slaveId,
+        string parameterName
+    )
     {
-        string key = BuildParameterKey(stationName, slaveId, Name);
+        string key = BuildKey(connectionKey, stationName, slaveId, parameterName);
 
         lock (_errorLock)
         {
@@ -92,19 +71,14 @@ public class ReadingStore
         }
     }
 
-    public int GetParameterErrorCount(string stationName, byte slaveId, string Name)
+    public void ResetParameterErrorCount(
+        string connectionKey,
+        string stationName,
+        byte slaveId,
+        string parameterName
+    )
     {
-        string key = BuildParameterKey(stationName, slaveId, Name);
-
-        lock (_errorLock)
-        {
-            return _parameterErrorCounts.TryGetValue(key, out int count) ? count : 0;
-        }
-    }
-
-    public void ResetParameterErrorCount(string stationName, byte slaveId, string Name)
-    {
-        string key = BuildParameterKey(stationName, slaveId, Name);
+        string key = BuildKey(connectionKey, stationName, slaveId, parameterName);
 
         lock (_errorLock)
         {
@@ -112,10 +86,23 @@ public class ReadingStore
         }
     }
 
-    private static string BuildParameterKey(string stationName, byte slaveId, string Name)
+    // ============================================================
+    // KEY
+    // ============================================================
+
+    private static string BuildKey(
+        string connectionKey,
+        string stationName,
+        byte slaveId,
+        string parameterName
+    )
     {
-        return $"{stationName}|{slaveId}|{Name}";
+        return $"{connectionKey}|{stationName}|{slaveId}|{parameterName}";
     }
+
+    // ============================================================
+    // CLONE
+    // ============================================================
 
     private static SensorReading CloneReading(SensorReading reading)
     {

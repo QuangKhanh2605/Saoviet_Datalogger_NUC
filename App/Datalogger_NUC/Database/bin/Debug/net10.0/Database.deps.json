@@ -8,7 +8,8 @@
     ".NETCoreApp,Version=v10.0": {
       "Database/1.0.0": {
         "dependencies": {
-          "Microsoft.Data.Sqlite": "10.0.11"
+          "Microsoft.Data.Sqlite": "10.0.11",
+          "StackExchange.Redis": "3.4.0"
         },
         "runtime": {
           "Database.dll": {}
@@ -29,6 +30,14 @@
           "lib/net8.0/Microsoft.Data.Sqlite.dll": {
             "assemblyVersion": "10.0.11.0",
             "fileVersion": "10.0.1126.37416"
+          }
+        }
+      },
+      "RESPite/3.4.0": {
+        "runtime": {
+          "lib/net10.0/RESPite.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.4.0.59332"
           }
         }
       },
@@ -176,6 +185,26 @@
             "fileVersion": "2.1.12.3116"
           }
         }
+      },
+      "StackExchange.Redis/3.4.0": {
+        "dependencies": {
+          "RESPite": "3.4.0",
+          "System.IO.Hashing": "10.0.12"
+        },
+        "runtime": {
+          "lib/net10.0/StackExchange.Redis.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.4.0.59332"
+          }
+        }
+      },
+      "System.IO.Hashing/10.0.12": {
+        "runtime": {
+          "lib/net10.0/System.IO.Hashing.dll": {
+            "assemblyVersion": "10.0.0.12",
+            "fileVersion": "10.0.1226.42308"
+          }
+        }
       }
     }
   },
@@ -198,6 +227,13 @@
       "sha512": "sha512-hubA20AGenQ4Sx0ElWaPpB8DISjXpdx463+1zOGRslsT0e/t/06ITv+pHsop8CcJ0d8PZLfgnT7juCDVD79Dkw==",
       "path": "microsoft.data.sqlite.core/10.0.11",
       "hashPath": "microsoft.data.sqlite.core.10.0.11.nupkg.sha512"
+    },
+    "RESPite/3.4.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-BEdf42Eugi6oNw84vSQuLvYOzoY9KLv6gKsxFbSbv1zm23DiCULeQ8jobRgGip43T0GoAJstFW0TXvKRx9Ewlg==",
+      "path": "respite/3.4.0",
+      "hashPath": "respite.3.4.0.nupkg.sha512"
     },
     "SQLitePCLRaw.bundle_e_sqlite3/2.1.12": {
       "type": "package",
@@ -226,6 +262,20 @@
       "sha512": "sha512-W3oH4XIfCzFrgUSDKHhN6N+dgzA5YHOR2VxX8GB6Qy7CyrJJgxPEG8NirgYWlPQC5P2jz2knSsexWu4tDUL33g==",
       "path": "sqlitepclraw.provider.e_sqlite3/2.1.12",
       "hashPath": "sqlitepclraw.provider.e_sqlite3.2.1.12.nupkg.sha512"
+    },
+    "StackExchange.Redis/3.4.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-29fvhba1pHQ2Vs+FIiG2201G62xL4EayGMm7yNZrHh/IcOZbzhl4g1CKQQP9xhznzDHybFURyj3XN433QctdPA==",
+      "path": "stackexchange.redis/3.4.0",
+      "hashPath": "stackexchange.redis.3.4.0.nupkg.sha512"
+    },
+    "System.IO.Hashing/10.0.12": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jDix4bBMYnpZdSPcnY+KDV6ik3SRMzpMKby/bZl/XUwIiflwRNAFZ0oOl61R/pSaveIJ8t1gs2BUlrGsPs/bcg==",
+      "path": "system.io.hashing/10.0.12",
+      "hashPath": "system.io.hashing.10.0.12.nupkg.sha512"
     }
   }
 }

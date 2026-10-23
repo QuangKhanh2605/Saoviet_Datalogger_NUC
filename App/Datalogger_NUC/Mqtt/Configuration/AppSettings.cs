@@ -4,10 +4,6 @@ public class AppSettings
 {
     public DeviceSettings Device { get; set; } = new();
 
-    public SensorSettings Sensor { get; set; } = new();
-
-    public DatabaseSettings Database { get; set; } = new();
-
     public MqttSettings Mqtt { get; set; } = new();
 
     public FtpSettings Ftp { get; set; } = new();
@@ -23,15 +19,6 @@ public class DeviceSettings
 {
     public string Id { get; set; } = "";
     public string Ver { get; set; } = "";
-}
-
-// ============================================================
-// SENSOR
-// ============================================================
-
-public class SensorSettings
-{
-    public int ReadIntervalSeconds { get; set; } = 1;
 }
 
 // ============================================================

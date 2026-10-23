@@ -8,10 +8,7 @@ public class ModbusRtu : IModbusClient
     private const int ReadTimeoutMilliseconds = 1000;
     private const int WriteTimeoutMilliseconds = 1000;
 
-    // Ở 9600 baud:
-    // 1 character ~ 1.04 ms với 10 bit/character.
-    // 3.5 character ~ 3.65 ms.
-    private const int InterFrameDelayMilliseconds = 5;
+    private const int InterFrameDelayMilliseconds = 50;
 
     private const int RetryDelayMilliseconds = 20;
 

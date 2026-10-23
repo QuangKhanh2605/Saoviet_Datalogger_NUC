@@ -55,3 +55,6 @@ D:\Datalogger_NUC\Database\obj\Debug\net10.0\Database.pdb
 D:\Datalogger_NUC\Database\obj\Debug\net10.0\Database.genruntimeconfig.cache
 D:\Datalogger_NUC\Database\obj\Debug\net10.0\ref\Database.dll
 D:\Datalogger_NUC\Database\bin\Debug\net10.0\RuntimeData\DatabaseConfig.json
+D:\Datalogger_NUC\database\bin\Debug\net10.0\RESPite.dll
+D:\Datalogger_NUC\database\bin\Debug\net10.0\StackExchange.Redis.dll
+D:\Datalogger_NUC\database\bin\Debug\net10.0\System.IO.Hashing.dll

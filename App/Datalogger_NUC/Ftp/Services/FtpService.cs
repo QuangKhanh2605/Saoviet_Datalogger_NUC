@@ -39,25 +39,43 @@ public class FtpService
             packageTimestamp
         );
 
+        using var client = new AsyncFtpClient(server.IP, server.User, server.Pass, server.Port);
+
+        // FluentFTP timeout
+        client.Config.ConnectTimeout = 10000;
+        client.Config.ReadTimeout = 10000;
+        client.Config.DataConnectionConnectTimeout = 10000;
+
+        // Timeout tổng cho một lần FTP
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+
         try
         {
-            using var client = new AsyncFtpClient(server.IP, server.User, server.Pass, server.Port);
+            // =====================================================
+            // CONNECT
+            // =====================================================
 
-            client.Config.ConnectTimeout = 10000;
-            client.Config.ReadTimeout = 10000;
-            client.Config.DataConnectionConnectTimeout = 10000;
+            await client.Connect(timeoutCts.Token);
 
-            await client.Connect(cancellationToken);
+            // =====================================================
+            // UPLOAD
+            // =====================================================
 
             FtpStatus status = await client.UploadBytes(
                 data,
                 remotePath,
                 FtpRemoteExists.Overwrite,
                 true,
-                token: cancellationToken
+                token: timeoutCts.Token
             );
 
-            await client.Disconnect(cancellationToken);
+            // =====================================================
+            // UPLOAD XONG -> DISCONNECT
+            // =====================================================
+
+            await DisconnectSafelyAsync(client, cancellationToken);
 
             if (status == FtpStatus.Success)
             {
@@ -80,11 +98,43 @@ public class FtpService
             return false;
         }
         catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            // =====================================================
+            // TIMEOUT 60 GIÂY
+            // =====================================================
+
+            _logger.LogError(
+                "FTP upload timeout sau 60 giây. " + "Server={Server}, File={File}",
+                server.IP,
+                remotePath
+            );
+
+            // Timeout rồi -> cố disconnect
+            await DisconnectSafelyAsync(client, cancellationToken);
+
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            // =====================================================
+            // WORKER / APPLICATION ĐANG SHUTDOWN
+            // =====================================================
+
+            _logger.LogInformation(
+                "FTP upload bị hủy do ứng dụng dừng. " + "Server={Server}, File={File}",
+                server.IP,
+                remotePath
+            );
+
             throw;
         }
         catch (Exception ex)
         {
+            // =====================================================
+            // FTP ERROR
+            // =====================================================
+
             _logger.LogError(
                 ex,
                 "FTP upload lỗi. Server={Server}, File={File}",
@@ -92,7 +142,39 @@ public class FtpService
                 remotePath
             );
 
+            // Có lỗi -> cố disconnect
+            await DisconnectSafelyAsync(client, cancellationToken);
+
             return false;
+        }
+    }
+
+    private async Task DisconnectSafelyAsync(
+        AsyncFtpClient client,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            if (!client.IsConnected)
+                return;
+
+            // Disconnect tối đa 5 giây.
+            using var disconnectCts = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken
+            );
+
+            disconnectCts.CancelAfter(TimeSpan.FromSeconds(5));
+
+            await client.Disconnect(disconnectCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("FTP disconnect bị timeout hoặc bị hủy.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FTP disconnect lỗi.");
         }
     }
 
